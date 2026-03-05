@@ -11,7 +11,7 @@ from datetime import date, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import requests
 
-st.set_page_config(page_title="S&P 500 Sector ETF YTD Returns", layout="wide")
+st.set_page_config(page_title="S&P 500 Sector ETF Returns", layout="wide")
 
 ETF_TO_GICS = {
     "XLC":  "Communication Services",
@@ -147,10 +147,10 @@ def svg_to_data_url(svg_str):
 def render_ytd_html(ytd_df):
     rows = []
     for _, row in ytd_df.iterrows():
-        ytd_val = row["YTD Return (%)"]
+        ytd_val = row["Return (%)"]
         color   = "#1a9850" if ytd_val >= 0 else "#d73027"
         svg     = make_price_bar_svg(
-            row["YTD Low"], row["Year Start"], row["Current"], row["YTD High"],
+            row["Period Low"], row["Year Start"], row["Current"], row["Period High"],
             inline=True,
         )
         is_benchmark = row["Ticker"] in ("SPY", "RSP")
@@ -171,9 +171,9 @@ def render_ytd_html(ytd_df):
         <tr style="border-bottom:2px solid rgba(128,128,128,0.4)">
           <th style="padding:8px 12px;text-align:left;white-space:nowrap">Name</th>
           <th style="padding:8px 12px;text-align:left">Ticker</th>
-          <th style="padding:8px 12px;text-align:right;white-space:nowrap">YTD Return</th>
+          <th style="padding:8px 12px;text-align:right;white-space:nowrap">Return</th>
           <th style="padding:8px 12px;text-align:left">
-            YTD Price Range &nbsp;&#8212;&nbsp; Low &nbsp;|&nbsp; &#9670; Year-Start &nbsp;|&nbsp; &#9679; Current &nbsp;|&nbsp; High
+            Price Range &nbsp;&#8212;&nbsp; Low &nbsp;|&nbsp; &#9670; Period-Start &nbsp;|&nbsp; &#9679; Current &nbsp;|&nbsp; High
           </th>
         </tr>
       </thead>
@@ -184,52 +184,51 @@ def render_ytd_html(ytd_df):
 # ── Data fetching ──────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600, show_spinner="Downloading price data...")
-def fetch_all_data():
-    year = date.today().year
-    today = date.today()
-    start = f"{year - 1}-12-28"
+def fetch_all_data(start_date: date, end_date: date):
+    symbols     = list(TICKERS.keys())
+    fetch_start = (start_date - timedelta(days=10)).isoformat()
+    fetch_end   = (end_date   + timedelta(days=1)).isoformat()
 
-    symbols = list(TICKERS.keys())
-    ohlcv   = yf.download(symbols, start=start, end=(today + timedelta(days=1)).isoformat(), auto_adjust=True, progress=False)
-    raw     = ohlcv["Close"]
-    raw_h   = ohlcv["High"]
-    raw_l   = ohlcv["Low"]
+    ohlcv = yf.download(symbols, start=fetch_start, end=fetch_end, auto_adjust=True, progress=False)
+    raw   = ohlcv["Close"]
+    raw_h = ohlcv["High"]
+    raw_l = ohlcv["Low"]
 
-    latest = raw.iloc[-1]
-    as_of  = raw.index[-1].date()
+    # Base price = last close on or before start_date
+    base_raw = raw[raw.index.date <= start_date]
+    base     = base_raw.iloc[-1]
 
-    # ── YTD returns ───────────────────────────────────────────────────────────
-    base = raw[raw.index.year == year - 1].iloc[-1]
-    ytd  = ((latest - base) / base * 100).round(2)
-    ytd_df = pd.DataFrame(ytd).reset_index()
-    ytd_df.columns = ["Ticker", "YTD Return (%)"]
+    # Period = start_date through end_date
+    period_raw = raw[(raw.index.date >= start_date) & (raw.index.date <= end_date)]
+    latest     = period_raw.iloc[-1]
+    as_of      = period_raw.index[-1].date()
+
+    # ── Period returns ────────────────────────────────────────────────────────
+    ret    = ((latest - base) / base * 100).round(2)
+    ytd_df = pd.DataFrame(ret).reset_index()
+    ytd_df.columns = ["Ticker", "Return (%)"]
     ytd_df["Name"]       = ytd_df["Ticker"].map(TICKERS)
     ytd_df["As of Date"] = as_of
 
-    # Merge in YTD price stats needed for the price bar
-    ytd_raw    = raw[raw.index.year == year]
     price_stats = pd.DataFrame({
         "Ticker":     symbols,
         "Year Start": base[symbols].round(2).values,
-        "YTD High":   ytd_raw[symbols].max().round(2).values,
-        "YTD Low":    ytd_raw[symbols].min().round(2).values,
+        "Period High":   period_raw[symbols].max().round(2).values,
+        "Period Low":    period_raw[symbols].min().round(2).values,
         "Current":    latest[symbols].round(2).values,
     })
     ytd_df = ytd_df.merge(price_stats, on="Ticker")
-    ytd_df = ytd_df.sort_values("YTD Return (%)", ascending=False).reset_index(drop=True)
+    ytd_df = ytd_df.sort_values("Return (%)", ascending=False).reset_index(drop=True)
 
-    # ── 52-week high / low ────────────────────────────────────────────────────
-    window   = raw.tail(252)
-    window_h = raw_h.tail(252)
-    window_l = raw_l.tail(252)
+    # ── 52-week high / low (always trailing 252 days from end_date) ───────────
+    window   = raw[raw.index.date <= end_date].tail(252)
+    window_h = raw_h[raw_h.index.date <= end_date].tail(252)
+    window_l = raw_l[raw_l.index.date <= end_date].tail(252)
 
-    wk52_high = window[symbols].max()
-    wk52_low  = window[symbols].min()
-
-    # (52-wk high − 52-wk low) / current price
+    wk52_high      = window[symbols].max()
+    wk52_low       = window[symbols].min()
     hl_range_ratio = ((wk52_high - wk52_low) / latest[symbols]).round(4)
 
-    # Parkinson volatility (annualised): σ = sqrt(1/(4·ln2·n) · Σ ln(H/L)²) · sqrt(252)
     log_hl   = np.log(window_h[symbols] / window_l[symbols])
     park_vol = (np.sqrt((log_hl ** 2).mean() / (4 * np.log(2)) * 252) * 100).round(2)
 
@@ -239,18 +238,18 @@ def fetch_all_data():
         "52-Wk High":    wk52_high.round(2).values,
         "52-Wk Low":     wk52_low.round(2).values,
     })
-    price_df["% from High"]      = ((price_df["Current Price"] - price_df["52-Wk High"]) / price_df["52-Wk High"] * 100).round(2)
-    price_df["% from Low"]       = ((price_df["Current Price"] - price_df["52-Wk Low"])  / price_df["52-Wk Low"]  * 100).round(2)
-    price_df["HL / Price"]       = hl_range_ratio.values
-    price_df["Parkinson Vol (%)"]= park_vol.values
-    price_df["Name"] = price_df["Ticker"].map(TICKERS)
-    price_df = price_df.merge(ytd_df[["Ticker", "YTD Return (%)"]], on="Ticker")
-    price_df = price_df.sort_values("YTD Return (%)", ascending=False).reset_index(drop=True)
+    price_df["% from High"]       = ((price_df["Current Price"] - price_df["52-Wk High"]) / price_df["52-Wk High"] * 100).round(2)
+    price_df["% from Low"]        = ((price_df["Current Price"] - price_df["52-Wk Low"])  / price_df["52-Wk Low"]  * 100).round(2)
+    price_df["HL / Price"]        = hl_range_ratio.values
+    price_df["Parkinson Vol (%)"] = park_vol.values
+    price_df["Name"]              = price_df["Ticker"].map(TICKERS)
+    price_df = price_df.merge(ytd_df[["Ticker", "Return (%)"]], on="Ticker")
+    price_df = price_df.sort_values("Return (%)", ascending=False).reset_index(drop=True)
     price_df = price_df[["Name", "Ticker", "Current Price", "52-Wk High", "52-Wk Low",
                           "% from High", "% from Low", "HL / Price", "Parkinson Vol (%)"]]
 
-    # ── Daily YTD return series ───────────────────────────────────────────────
-    ytd_series = raw[raw.index.year == year].copy()
+    # ── Daily return series ───────────────────────────────────────────────────
+    ytd_series = period_raw.copy()
     ytd_series = ((ytd_series - base) / base * 100).round(4)
     ytd_series = ytd_series.rename(columns=TICKERS)
     ytd_series.index = ytd_series.index.date
@@ -278,13 +277,13 @@ def get_sp500_constituents():
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_sector_stock_data(tickers_tuple, year):
-    tickers = list(tickers_tuple)
-    dl      = tickers + ([] if "SPY" in tickers else ["SPY"])
-    start   = f"{year - 1}-12-28"
-    end     = (date.today() + timedelta(days=1)).isoformat()
+def get_sector_stock_data(tickers_tuple, start_date: date, end_date: date):
+    tickers     = list(tickers_tuple)
+    dl          = tickers + ([] if "SPY" in tickers else ["SPY"])
+    fetch_start = (start_date - timedelta(days=10)).isoformat()
+    fetch_end   = (end_date   + timedelta(days=1)).isoformat()
 
-    ohlcv = yf.download(dl, start=start, end=end, auto_adjust=True, progress=False)
+    ohlcv = yf.download(dl, start=fetch_start, end=fetch_end, auto_adjust=True, progress=False)
     close, high, low = ohlcv["Close"], ohlcv["High"], ohlcv["Low"]
 
     # Ensure DataFrame even for single ticker
@@ -293,12 +292,13 @@ def get_sector_stock_data(tickers_tuple, year):
         high  = high.to_frame(tickers[0])
         low   = low.to_frame(tickers[0])
 
-    latest    = close.iloc[-1]
-    base      = close[close.index.year == year - 1].iloc[-1]
+    base      = close[close.index.date <= start_date].iloc[-1]
+    period_c  = close[(close.index.date >= start_date) & (close.index.date <= end_date)]
+    latest    = period_c.iloc[-1]
     ytd       = ((latest - base) / base * 100).round(2)
-    wc        = close[tickers].tail(252)
-    wh        = high[tickers].tail(252)
-    wl        = low[tickers].tail(252)
+    wc        = close[tickers][close.index.date <= end_date].tail(252)
+    wh        = high[tickers][high.index.date   <= end_date].tail(252)
+    wl        = low[tickers][low.index.date     <= end_date].tail(252)
     hi52      = wc.max()
     lo52      = wc.min()
 
@@ -326,7 +326,7 @@ def get_sector_stock_data(tickers_tuple, year):
         rows.append({
             "Ticker":            t,
             "Current Price":     round(cur, 2),
-            "YTD Return (%)":    round(float(ytd.get(t, np.nan)), 2),
+            "Return (%)":    round(float(ytd.get(t, np.nan)), 2),
             "52-Wk High":        round(h52, 2),
             "52-Wk Low":         round(l52, 2),
             "% from High":       round((cur - h52) / h52 * 100, 2) if h52 else None,
@@ -365,8 +365,21 @@ def get_sector_fundamentals(tickers_tuple):
 
 # ── Layout ────────────────────────────────────────────────────────────────────
 
-st.title("S&P 500 Sector ETF — YTD Returns")
-st.caption(f"Data as of {date.today().strftime('%B %d, %Y')}")
+# Sidebar date range
+with st.sidebar:
+    st.header("Date Range")
+    default_start = date.today() - timedelta(days=365)
+    default_end   = date.today()
+    start_date = st.date_input("Start Date", value=default_start, max_value=default_end)
+    end_date   = st.date_input("End Date",   value=default_end,   min_value=start_date)
+    st.caption("Default: 1 year rolling. Set both dates to customize the period for all charts and tables.")
+
+today = date.today()
+is_ytd = (start_date == date(today.year, 1, 1) and end_date == today)
+period_label = f"{start_date.strftime('%m-%d-%Y')} ->{end_date.strftime('%m-%d-%Y')}"
+
+st.title("S&P 500 Sector ETF — Returns")
+st.caption(f"Period: **{start_date.strftime('%m-%d-%Y')}** -> **{end_date.strftime('%m-%d-%Y')}**")
 
 col_btn, _ = st.columns([1, 9])
 with col_btn:
@@ -374,38 +387,38 @@ with col_btn:
         st.cache_data.clear()
 
 try:
-    df, price_df, ytd_series = fetch_all_data()
+    df, price_df, ytd_series = fetch_all_data(start_date, end_date)
 
     # ── YTD bar chart ─────────────────────────────────────────────────────────
     benchmarks = {TICKERS["SPY"], TICKERS["RSP"]}
     bar_texts = [
         f"<b>{v:+.2f}%</b>" if name in benchmarks else f"{v:+.2f}%"
-        for name, v in zip(df["Name"], df["YTD Return (%)"])
+        for name, v in zip(df["Name"], df["Return (%)"])
     ]
     bar_text_sizes = [15 if name in benchmarks else 11 for name in df["Name"]]
 
     fig = px.bar(
         df,
         x="Name",
-        y="YTD Return (%)",
-        color="YTD Return (%)",
+        y="Return (%)",
+        color="Return (%)",
         color_continuous_scale=["#d73027", "#fee08b", "#1a9850"],
         color_continuous_midpoint=0,
         text=bar_texts,
-        title="YTD Return by Sector ETF",
+        title=f"{period_label} Return by Sector ETF",
         height=500,
     )
     fig.update_traces(textposition="outside", textfont=dict(size=bar_text_sizes))
     fig.update_layout(
         xaxis_title="",
-        yaxis_title="YTD Return (%)",
+        yaxis_title="Return (%)",
         coloraxis_showscale=False,
         xaxis_tickangle=-30,
     )
     st.plotly_chart(fig, use_container_width=True)
 
     # ── YTD line chart ────────────────────────────────────────────────────────
-    st.subheader("YTD Performance Over Time")
+    st.subheader(f"Performance Over Time — {period_label}")
     all_names = list(ytd_series.columns)
 
     if "line_chart_selection" not in st.session_state:
@@ -431,11 +444,11 @@ try:
             ytd_series[selected]
             .reset_index()
             .rename(columns={"index": "Date"})
-            .melt(id_vars="Date", var_name="ETF", value_name="YTD Return (%)")
+            .melt(id_vars="Date", var_name="ETF", value_name="Return (%)")
         )
         spy_name = TICKERS["SPY"]
-        line_fig = px.line(long_df, x="Date", y="YTD Return (%)", color="ETF",
-                           title="YTD Return (%) — Daily", height=500)
+        line_fig = px.line(long_df, x="Date", y="Return (%)", color="ETF",
+                           title=f"Return (%) — Daily ({period_label})", height=500)
         line_fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
         line_fig.update_layout(xaxis_title="", yaxis_ticksuffix="%", legend_title="")
         if spy_name in selected:
@@ -474,20 +487,34 @@ try:
         long_gdf = (
             plot_gdf.reset_index()
             .rename(columns={"index": "Date"})
-            .melt(id_vars="Date", var_name="Group", value_name="YTD Return (%)")
+            .melt(id_vars="Date", var_name="Group", value_name="Return (%)")
         )
-        fig_g = px.line(long_gdf, x="Date", y="YTD Return (%)", color="Group",
+        fig_g = px.line(long_gdf, x="Date", y="Return (%)", color="Group",
                         color_discrete_map=GROUP_COLORS, height=460)
         fig_g.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
         fig_g.update_layout(legend_title="", yaxis_ticksuffix="%", xaxis_title="")
         st.plotly_chart(fig_g, use_container_width=True)
 
         # Per-group sector breakdown
+        max_sectors = max(len(t) for t in GROUPS.values())
         for grp, tickers in GROUPS.items():
             names = [TICKERS[t] for t in tickers]
             vals  = ytd_series[names].iloc[-1].round(2)
-            parts = " · ".join(f"{t}: {v:+.2f}%" for t, v in zip(tickers, vals.values))
-            st.caption(f"**{grp}:** {parts}")
+            label_col, *sector_cols = st.columns([1] + [1] * max_sectors)
+            label_col.markdown(
+                f"<div style='padding-top:6px;font-weight:bold;font-size:13px'>{grp}</div>",
+                unsafe_allow_html=True,
+            )
+            for col, t, v in zip(sector_cols, tickers, vals.values):
+                color = "#1a9850" if v > 0 else "#d73027"
+                col.markdown(
+                    f"<div style='text-align:center'>"
+                    f"<div style='font-size:12px;color:gray'>{t}</div>"
+                    f"<div style='font-size:15px;font-weight:bold;color:{color}'>{v:+.2f}%</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            st.markdown("<div style='margin-bottom:12px'></div>", unsafe_allow_html=True)
 
     with tab_spread:
         cyc_def_now = group_df["Cyclical"].iloc[-1] - group_df["Defensive"].iloc[-1]
@@ -538,8 +565,8 @@ try:
         color = "#1a9850" if val > 0 else "#d73027" if val < 0 else "gray"
         return f"color: {color}; font-weight: bold"
 
-    # ── YTD Returns table (with price bar) ───────────────────────────────────
-    st.subheader("YTD Returns")
+    # ── Returns table (with price bar) ───────────────────────────────────────
+    st.subheader(f"Returns — {period_label}")
 
     st.markdown(render_ytd_html(df), unsafe_allow_html=True)
 
@@ -569,9 +596,9 @@ try:
 
     st.caption(
         f"Prices as of {df['As of Date'].iloc[0]}. "
-        f"YTD return calculated from the last trading day of {df['As of Date'].iloc[0].year - 1}. "
-        f"52-week range based on last 252 trading days. "
-        f"Price bar: gray=YTD range, colored fill=year-start→current, white tick=year-start, dot=current price."
+        f"Return calculated from {start_date.strftime('%m-%d-%Y')} -> {end_date.strftime('%m-%d-%Y')}. "
+        f"52-week range based on last 252 trading days from end date. "
+        f"Price bar: gray=period range, colored fill=period-start→current, white tick=period-start, dot=current price."
     )
 
     # ── Sector Deep Dive ──────────────────────────────────────────────────────
@@ -602,12 +629,12 @@ try:
             name_map  = sp500.set_index("Ticker")[["Name", "Sub-Industry"]].to_dict("index")
 
             with st.spinner("Loading price data…"):
-                price_data = get_sector_stock_data(tickers_t, date.today().year)
+                price_data = get_sector_stock_data(tickers_t, start_date, end_date)
 
             data = price_data.copy()
             data["Name"]         = data["Ticker"].map(lambda t: name_map.get(t, {}).get("Name", t))
             data["Sub-Industry"] = data["Ticker"].map(lambda t: name_map.get(t, {}).get("Sub-Industry", ""))
-            data = data.sort_values("YTD Return (%)", ascending=False).reset_index(drop=True)
+            data = data.sort_values("Return (%)", ascending=False).reset_index(drop=True)
             data.insert(0, "Rank", range(1, len(data) + 1))
 
             tab_ind, tab_stocks = st.tabs(["Sub-Industry Summary", "Stock Rankings"])
@@ -618,50 +645,50 @@ try:
                     data.groupby("Sub-Industry")
                     .agg(
                         Stocks        = ("Ticker",        "count"),
-                        Avg_YTD       = ("YTD Return (%)", "mean"),
-                        Median_YTD    = ("YTD Return (%)", "median"),
-                        Pct_Positive  = ("YTD Return (%)", lambda x: (x > 0).mean() * 100),
+                        Avg_Ret       = ("Return (%)", "mean"),
+                        Median_Ret    = ("Return (%)", "median"),
+                        Pct_Positive  = ("Return (%)", lambda x: (x > 0).mean() * 100),
                         Avg_Beta      = ("Beta (1Y)",      "mean"),
                         Avg_ParkVol   = ("Parkinson Vol (%)","mean"),
                     )
                     .reset_index()
                 )
                 # Best / Worst stock per sub-industry
-                best = (data.loc[data.groupby("Sub-Industry")["YTD Return (%)"].idxmax(),
-                                 ["Sub-Industry", "Ticker", "YTD Return (%)"]]
-                           .rename(columns={"Ticker": "Best", "YTD Return (%)": "Best Ret (%)"}))
-                worst = (data.loc[data.groupby("Sub-Industry")["YTD Return (%)"].idxmin(),
-                                  ["Sub-Industry", "Ticker", "YTD Return (%)"]]
-                            .rename(columns={"Ticker": "Worst", "YTD Return (%)": "Worst Ret (%)"}))
+                best = (data.loc[data.groupby("Sub-Industry")["Return (%)"].idxmax(),
+                                 ["Sub-Industry", "Ticker", "Return (%)"]]
+                           .rename(columns={"Ticker": "Best", "Return (%)": "Best Ret (%)"}))
+                worst = (data.loc[data.groupby("Sub-Industry")["Return (%)"].idxmin(),
+                                  ["Sub-Industry", "Ticker", "Return (%)"]]
+                            .rename(columns={"Ticker": "Worst", "Return (%)": "Worst Ret (%)"}))
                 grp = grp.merge(best, on="Sub-Industry").merge(worst, on="Sub-Industry")
-                grp = grp.sort_values("Avg_YTD", ascending=False).reset_index(drop=True)
+                grp = grp.sort_values("Avg_Ret", ascending=False).reset_index(drop=True)
                 grp.insert(0, "Rank", range(1, len(grp) + 1))
                 grp.columns = ["Rank", "Sub-Industry", "# Stocks",
-                                "Avg YTD (%)", "Median YTD (%)", "% Positive",
+                                "Avg Return (%)", "Median Return (%)", "% Positive",
                                 "Avg Beta", "Avg Vol (%)",
                                 "Best", "Best Ret (%)", "Worst", "Worst Ret (%)"]
 
                 # Bar chart — sub-industries by avg YTD
-                si_chart = grp.sort_values("Avg YTD (%)")
+                si_chart = grp.sort_values("Avg Return (%)")
                 fig_si = px.bar(
-                    si_chart, x="Avg YTD (%)", y="Sub-Industry", orientation="h",
-                    color="Avg YTD (%)",
+                    si_chart, x="Avg Return (%)", y="Sub-Industry", orientation="h",
+                    color="Avg Return (%)",
                     color_continuous_scale=["#d73027", "#fee08b", "#1a9850"],
                     color_continuous_midpoint=0,
-                    text=si_chart["Avg YTD (%)"].apply(lambda v: f"{v:+.2f}%"),
-                    title=f"{chosen_label} — Sub-Industry Avg YTD Return",
+                    text=si_chart["Avg Return (%)"].apply(lambda v: f"{v:+.2f}%"),
+                    title=f"{chosen_label} — Sub-Industry Avg Return ({period_label})",
                     height=max(380, len(grp) * 32),
                 )
                 fig_si.update_traces(textposition="outside")
                 fig_si.update_layout(coloraxis_showscale=False,
                                      xaxis_ticksuffix="%", yaxis_title="",
-                                     xaxis_title="Avg YTD Return (%)")
+                                     xaxis_title="Avg Return (%)")
                 st.plotly_chart(fig_si, use_container_width=True)
 
                 # Summary table
                 fmt_si = {
-                    "Avg YTD (%)":    "{:+.2f}%",
-                    "Median YTD (%)": "{:+.2f}%",
+                    "Avg Return (%)":    "{:+.2f}%",
+                    "Median Return (%)": "{:+.2f}%",
                     "% Positive":     "{:.0f}%",
                     "Avg Beta":       "{:.2f}",
                     "Avg Vol (%)":    "{:.2f}%",
@@ -670,7 +697,7 @@ try:
                 }
                 styled_si = (
                     grp.style
-                    .map(color_return, subset=["Avg YTD (%)", "Median YTD (%)",
+                    .map(color_return, subset=["Avg Return (%)", "Median Return (%)",
                                                "Best Ret (%)", "Worst Ret (%)"])
                     .format(fmt_si, na_rep="—")
                     .hide(axis="index")
@@ -684,37 +711,37 @@ try:
                                         horizontal=True, key="chart_orient",
                                         label_visibility="visible")
                 if chart_orient == "Horizontal":
-                    ranked = data.sort_values("YTD Return (%)")
+                    ranked = data.sort_values("Return (%)")
                     fig_r = px.bar(
-                        ranked, x="YTD Return (%)", y="Ticker", orientation="h",
-                        color="YTD Return (%)",
+                        ranked, x="Return (%)", y="Ticker", orientation="h",
+                        color="Return (%)",
                         color_continuous_scale=["#d73027", "#fee08b", "#1a9850"],
                         color_continuous_midpoint=0,
-                        text=ranked["YTD Return (%)"].apply(lambda v: f"{v:+.2f}%"),
-                        hover_data={"Name": True, "YTD Return (%)": False},
-                        title=f"{chosen_label} — YTD Return Ranking",
+                        text=ranked["Return (%)"].apply(lambda v: f"{v:+.2f}%"),
+                        hover_data={"Name": True, "Return (%)": False},
+                        title=f"{chosen_label} — Return Ranking ({period_label})",
                         height=max(420, len(data) * 22),
                     )
                     fig_r.update_traces(textposition="outside")
                     fig_r.update_layout(coloraxis_showscale=False,
                                         xaxis_ticksuffix="%", yaxis_title="",
-                                        xaxis_title="YTD Return (%)")
+                                        xaxis_title="Return (%)")
                 else:
-                    ranked = data.sort_values("YTD Return (%)", ascending=False)
+                    ranked = data.sort_values("Return (%)", ascending=False)
                     fig_r = px.bar(
-                        ranked, x="Ticker", y="YTD Return (%)", orientation="v",
-                        color="YTD Return (%)",
+                        ranked, x="Ticker", y="Return (%)", orientation="v",
+                        color="Return (%)",
                         color_continuous_scale=["#d73027", "#fee08b", "#1a9850"],
                         color_continuous_midpoint=0,
-                        text=ranked["YTD Return (%)"].apply(lambda v: f"{v:+.2f}%"),
-                        hover_data={"Name": True, "YTD Return (%)": False},
-                        title=f"{chosen_label} — YTD Return Ranking",
+                        text=ranked["Return (%)"].apply(lambda v: f"{v:+.2f}%"),
+                        hover_data={"Name": True, "Return (%)": False},
+                        title=f"{chosen_label} — Return Ranking ({period_label})",
                         height=500,
                     )
                     fig_r.update_traces(textposition="outside")
                     fig_r.update_layout(coloraxis_showscale=False,
                                         yaxis_ticksuffix="%", xaxis_title="",
-                                        yaxis_title="YTD Return (%)")
+                                        yaxis_title="Return (%)")
                 st.plotly_chart(fig_r, use_container_width=True)
 
                 # Fundamental factors toggle (after chart)
@@ -726,7 +753,7 @@ try:
                     data = data.merge(fund_data, on="Ticker", how="left")
 
                 base_cols = ["Rank", "Ticker", "Name", "Sub-Industry",
-                             "YTD Return (%)", "Current Price",
+                             "Return (%)", "Current Price",
                              "52-Wk High", "52-Wk Low", "% from High", "% from Low",
                              "Beta (1Y)", "Parkinson Vol (%)"]
                 fund_cols = ["Mkt Cap ($B)", "P/E", "Fwd P/E", "Div Yield (%)", "EPS Growth (%)"]
@@ -735,7 +762,7 @@ try:
                 data = data[cols]
 
                 fmt = {
-                    "YTD Return (%)":    "{:+.2f}%",
+                    "Return (%)":    "{:+.2f}%",
                     "Current Price":     "${:.2f}",
                     "52-Wk High":        "${:.2f}",
                     "52-Wk Low":         "${:.2f}",
@@ -753,7 +780,7 @@ try:
 
                 styled_stocks = (
                     data.style
-                    .map(color_return, subset=["YTD Return (%)", "% from High", "% from Low"])
+                    .map(color_return, subset=["Return (%)", "% from High", "% from Low"])
                     .format(fmt, na_rep="—")
                     .hide(axis="index")
                 )
