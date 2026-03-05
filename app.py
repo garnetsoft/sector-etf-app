@@ -8,8 +8,24 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import date, timedelta
+from concurrent.futures import ThreadPoolExecutor
+import requests
 
 st.set_page_config(page_title="S&P 500 Sector ETF YTD Returns", layout="wide")
+
+ETF_TO_GICS = {
+    "XLC":  "Communication Services",
+    "XLE":  "Energy",
+    "XLI":  "Industrials",
+    "XLK":  "Information Technology",
+    "XLB":  "Materials",
+    "XLF":  "Financials",
+    "XLRE": "Real Estate",
+    "XLY":  "Consumer Discretionary",
+    "XLP":  "Consumer Staples",
+    "XLU":  "Utilities",
+    "XLV":  "Health Care",
+}
 
 GROUPS = {
     "Sensitive":  ["XLC", "XLE", "XLI", "XLK"],
@@ -26,17 +42,17 @@ GROUP_COLORS = {
 TICKERS = {
     "SPY": "S&P 500 (SPY)",
     "RSP": "Equal Weight S&P 500 (RSP)",
+    "XLC": "Communication Services (XLC)",
+    "XLE": "Energy (XLE)",
+    "XLI": "Industrials (XLI)",
     "XLK": "Technology (XLK)",
+    "XLB": "Materials (XLB)",
     "XLF": "Financials (XLF)",
-    "XLV": "Health Care (XLV)",
+    "XLRE": "Real Estate (XLRE)",
     "XLY": "Consumer Discretionary (XLY)",
     "XLP": "Consumer Staples (XLP)",
-    "XLI": "Industrials (XLI)",
-    "XLE": "Energy (XLE)",
-    "XLB": "Materials (XLB)",
-    "XLC": "Communication Services (XLC)",
-    "XLRE": "Real Estate (XLRE)",
     "XLU": "Utilities (XLU)",
+    "XLV": "Health Care (XLV)",
 }
 
 # ── SVG price-bar helpers ──────────────────────────────────────────────────────
@@ -240,6 +256,111 @@ def fetch_all_data():
     ytd_series.index = ytd_series.index.date
 
     return ytd_df, price_df, ytd_series
+
+
+# ── Sector deep-dive helpers ──────────────────────────────────────────────────
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_sp500_constituents():
+    gics_to_etf = {v: k for k, v in ETF_TO_GICS.items()}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    resp = requests.get(
+        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+        headers=headers, timeout=15,
+    )
+    resp.raise_for_status()
+    df = pd.read_html(resp.text)[0]
+    df = df[["Symbol", "Security", "GICS Sector", "GICS Sub-Industry"]].copy()
+    df.columns = ["Ticker", "Name", "GICS Sector", "Sub-Industry"]
+    df["Ticker"] = df["Ticker"].str.replace(".", "-", regex=False)
+    df["ETF"]    = df["GICS Sector"].map(gics_to_etf)
+    return df.dropna(subset=["ETF"]).reset_index(drop=True)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_sector_stock_data(tickers_tuple, year):
+    tickers = list(tickers_tuple)
+    dl      = tickers + ([] if "SPY" in tickers else ["SPY"])
+    start   = f"{year - 1}-12-28"
+    end     = (date.today() + timedelta(days=1)).isoformat()
+
+    ohlcv = yf.download(dl, start=start, end=end, auto_adjust=True, progress=False)
+    close, high, low = ohlcv["Close"], ohlcv["High"], ohlcv["Low"]
+
+    # Ensure DataFrame even for single ticker
+    if isinstance(close, pd.Series):
+        close = close.to_frame(tickers[0])
+        high  = high.to_frame(tickers[0])
+        low   = low.to_frame(tickers[0])
+
+    latest    = close.iloc[-1]
+    base      = close[close.index.year == year - 1].iloc[-1]
+    ytd       = ((latest - base) / base * 100).round(2)
+    wc        = close[tickers].tail(252)
+    wh        = high[tickers].tail(252)
+    wl        = low[tickers].tail(252)
+    hi52      = wc.max()
+    lo52      = wc.min()
+
+    # Beta vs SPY from 252-day price returns
+    rets    = close.pct_change().dropna()
+    spy_var = rets["SPY"].var() if "SPY" in rets.columns else None
+    betas   = {}
+    if spy_var and spy_var > 0:
+        for t in tickers:
+            if t in rets.columns:
+                betas[t] = round(rets[t].cov(rets["SPY"]) / spy_var, 2)
+
+    # Parkinson volatility (annualised %)
+    park = {}
+    for t in tickers:
+        if t in wh.columns:
+            lhl = np.log(wh[t] / wl[t])
+            park[t] = round(np.sqrt((lhl**2).mean() / (4 * np.log(2)) * 252) * 100, 2)
+
+    rows = []
+    for t in tickers:
+        cur = float(latest.get(t, np.nan))
+        h52 = float(hi52.get(t, np.nan))
+        l52 = float(lo52.get(t, np.nan))
+        rows.append({
+            "Ticker":            t,
+            "Current Price":     round(cur, 2),
+            "YTD Return (%)":    round(float(ytd.get(t, np.nan)), 2),
+            "52-Wk High":        round(h52, 2),
+            "52-Wk Low":         round(l52, 2),
+            "% from High":       round((cur - h52) / h52 * 100, 2) if h52 else None,
+            "% from Low":        round((cur - l52) / l52 * 100, 2) if l52 else None,
+            "Beta (1Y)":         betas.get(t),
+            "Parkinson Vol (%)": park.get(t),
+        })
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_sector_fundamentals(tickers_tuple):
+    def fetch_one(ticker):
+        try:
+            info = yf.Ticker(ticker).info
+            mc   = info.get("marketCap")
+            pe   = info.get("trailingPE")
+            fpe  = info.get("forwardPE")
+            dy   = info.get("dividendYield")
+            eg   = info.get("earningsGrowth")
+            return {
+                "Ticker":          ticker,
+                "Mkt Cap ($B)":    round(mc / 1e9, 2)   if mc  else None,
+                "P/E":             round(pe, 1)          if pe  else None,
+                "Fwd P/E":         round(fpe, 1)         if fpe else None,
+                "Div Yield (%)":   round(dy, 2)          if dy  else None,
+                "EPS Growth (%)":  round(eg * 100, 1)    if eg  else None,
+            }
+        except Exception:
+            return {"Ticker": ticker}
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(fetch_one, list(tickers_tuple)))
+    return pd.DataFrame(results)
 
 
 # ── Layout ────────────────────────────────────────────────────────────────────
@@ -452,6 +573,123 @@ try:
         f"52-week range based on last 252 trading days. "
         f"Price bar: gray=YTD range, colored fill=year-start→current, white tick=year-start, dot=current price."
     )
+
+    # ── Sector Deep Dive ──────────────────────────────────────────────────────
+    st.subheader("Sector Deep Dive — Stock Rankings")
+
+    try:
+        sp500 = get_sp500_constituents()
+    except Exception as e:
+        st.error(f"Could not load S&P 500 constituents: {e}")
+        sp500 = None
+
+    if sp500 is not None:
+        sector_etfs   = [e for e in TICKERS if e not in ("SPY", "RSP")]
+        sector_labels = [TICKERS[e] for e in sector_etfs]
+
+        st.caption("Select a sector:")
+        chosen_label = st.radio("", sector_labels,
+                                horizontal=True, key="sector_radio",
+                                label_visibility="collapsed")
+        chosen_etf   = sector_etfs[sector_labels.index(chosen_label)]
+        gics_name    = ETF_TO_GICS[chosen_etf]
+
+        sector_stocks = sp500[sp500["ETF"] == chosen_etf]["Ticker"].tolist()
+        st.caption(f"**{gics_name}** · {chosen_etf} · {len(sector_stocks)} constituents")
+
+        if sector_stocks:
+            tickers_t = tuple(sorted(sector_stocks))
+            name_map  = sp500.set_index("Ticker")[["Name", "Sub-Industry"]].to_dict("index")
+
+            with st.spinner("Loading price data…"):
+                price_data = get_sector_stock_data(tickers_t, date.today().year)
+
+            data = price_data.copy()
+            data["Name"]         = data["Ticker"].map(lambda t: name_map.get(t, {}).get("Name", t))
+            data["Sub-Industry"] = data["Ticker"].map(lambda t: name_map.get(t, {}).get("Sub-Industry", ""))
+            data = data.sort_values("YTD Return (%)", ascending=False).reset_index(drop=True)
+            data.insert(0, "Rank", range(1, len(data) + 1))
+
+            # Ranking bar chart (shown first)
+            chart_orient = st.radio("Chart orientation:", ["Horizontal", "Vertical"],
+                                    horizontal=True, key="chart_orient",
+                                    label_visibility="visible")
+            if chart_orient == "Horizontal":
+                ranked = data.sort_values("YTD Return (%)")
+                fig_r = px.bar(
+                    ranked, x="YTD Return (%)", y="Ticker", orientation="h",
+                    color="YTD Return (%)",
+                    color_continuous_scale=["#d73027", "#fee08b", "#1a9850"],
+                    color_continuous_midpoint=0,
+                    text=ranked["YTD Return (%)"].apply(lambda v: f"{v:+.2f}%"),
+                    hover_data={"Name": True, "YTD Return (%)": False},
+                    title=f"{chosen_label} — YTD Return Ranking",
+                    height=max(420, len(data) * 22),
+                )
+                fig_r.update_traces(textposition="outside")
+                fig_r.update_layout(coloraxis_showscale=False,
+                                    xaxis_ticksuffix="%", yaxis_title="",
+                                    xaxis_title="YTD Return (%)")
+            else:
+                ranked = data.sort_values("YTD Return (%)", ascending=False)
+                fig_r = px.bar(
+                    ranked, x="Ticker", y="YTD Return (%)", orientation="v",
+                    color="YTD Return (%)",
+                    color_continuous_scale=["#d73027", "#fee08b", "#1a9850"],
+                    color_continuous_midpoint=0,
+                    text=ranked["YTD Return (%)"].apply(lambda v: f"{v:+.2f}%"),
+                    hover_data={"Name": True, "YTD Return (%)": False},
+                    title=f"{chosen_label} — YTD Return Ranking",
+                    height=500,
+                )
+                fig_r.update_traces(textposition="outside")
+                fig_r.update_layout(coloraxis_showscale=False,
+                                    yaxis_ticksuffix="%", xaxis_title="",
+                                    yaxis_title="YTD Return (%)")
+            st.plotly_chart(fig_r, use_container_width=True)
+
+            # Fundamental factors toggle (after chart)
+            show_fund = st.toggle("Show fundamental factors", value=True, key="show_fund")
+
+            if show_fund:
+                with st.spinner("Loading fundamentals (cached daily)…"):
+                    fund_data = get_sector_fundamentals(tickers_t)
+                data = data.merge(fund_data, on="Ticker", how="left")
+
+            base_cols = ["Rank", "Ticker", "Name", "Sub-Industry",
+                         "YTD Return (%)", "Current Price",
+                         "52-Wk High", "52-Wk Low", "% from High", "% from Low",
+                         "Beta (1Y)", "Parkinson Vol (%)"]
+            fund_cols = ["Mkt Cap ($B)", "P/E", "Fwd P/E", "Div Yield (%)", "EPS Growth (%)"]
+            cols = base_cols + (fund_cols if show_fund else [])
+            cols = [c for c in cols if c in data.columns]
+            data = data[cols]
+
+            fmt = {
+                "YTD Return (%)":    "{:+.2f}%",
+                "Current Price":     "${:.2f}",
+                "52-Wk High":        "${:.2f}",
+                "52-Wk Low":         "${:.2f}",
+                "% from High":       "{:+.2f}%",
+                "% from Low":        "{:+.2f}%",
+                "Beta (1Y)":         "{:.2f}",
+                "Parkinson Vol (%)": "{:.2f}%",
+                "Mkt Cap ($B)":      "${:.1f}B",
+                "P/E":               "{:.1f}x",
+                "Fwd P/E":           "{:.1f}x",
+                "Div Yield (%)":     "{:.2f}%",
+                "EPS Growth (%)":    "{:+.1f}%",
+            }
+            fmt = {k: v for k, v in fmt.items() if k in data.columns}
+
+            styled_stocks = (
+                data.style
+                .map(color_return, subset=["YTD Return (%)", "% from High", "% from Low"])
+                .format(fmt, na_rep="—")
+                .hide(axis="index")
+            )
+            st.dataframe(styled_stocks, use_container_width=True,
+                         height=min(35 * len(data) + 40, 800))
 
 except Exception as e:
     st.error(f"Could not fetch data: {e}")
