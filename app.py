@@ -610,86 +610,155 @@ try:
             data = data.sort_values("YTD Return (%)", ascending=False).reset_index(drop=True)
             data.insert(0, "Rank", range(1, len(data) + 1))
 
-            # Ranking bar chart (shown first)
-            chart_orient = st.radio("Chart orientation:", ["Horizontal", "Vertical"],
-                                    horizontal=True, key="chart_orient",
-                                    label_visibility="visible")
-            if chart_orient == "Horizontal":
-                ranked = data.sort_values("YTD Return (%)")
-                fig_r = px.bar(
-                    ranked, x="YTD Return (%)", y="Ticker", orientation="h",
-                    color="YTD Return (%)",
+            tab_ind, tab_stocks = st.tabs(["Sub-Industry Summary", "Stock Rankings"])
+
+            # ── Sub-Industry Summary ──────────────────────────────────────────
+            with tab_ind:
+                grp = (
+                    data.groupby("Sub-Industry")
+                    .agg(
+                        Stocks        = ("Ticker",        "count"),
+                        Avg_YTD       = ("YTD Return (%)", "mean"),
+                        Median_YTD    = ("YTD Return (%)", "median"),
+                        Pct_Positive  = ("YTD Return (%)", lambda x: (x > 0).mean() * 100),
+                        Avg_Beta      = ("Beta (1Y)",      "mean"),
+                        Avg_ParkVol   = ("Parkinson Vol (%)","mean"),
+                    )
+                    .reset_index()
+                )
+                # Best / Worst stock per sub-industry
+                best = (data.loc[data.groupby("Sub-Industry")["YTD Return (%)"].idxmax(),
+                                 ["Sub-Industry", "Ticker", "YTD Return (%)"]]
+                           .rename(columns={"Ticker": "Best", "YTD Return (%)": "Best Ret (%)"}))
+                worst = (data.loc[data.groupby("Sub-Industry")["YTD Return (%)"].idxmin(),
+                                  ["Sub-Industry", "Ticker", "YTD Return (%)"]]
+                            .rename(columns={"Ticker": "Worst", "YTD Return (%)": "Worst Ret (%)"}))
+                grp = grp.merge(best, on="Sub-Industry").merge(worst, on="Sub-Industry")
+                grp = grp.sort_values("Avg_YTD", ascending=False).reset_index(drop=True)
+                grp.insert(0, "Rank", range(1, len(grp) + 1))
+                grp.columns = ["Rank", "Sub-Industry", "# Stocks",
+                                "Avg YTD (%)", "Median YTD (%)", "% Positive",
+                                "Avg Beta", "Avg Vol (%)",
+                                "Best", "Best Ret (%)", "Worst", "Worst Ret (%)"]
+
+                # Bar chart — sub-industries by avg YTD
+                si_chart = grp.sort_values("Avg YTD (%)")
+                fig_si = px.bar(
+                    si_chart, x="Avg YTD (%)", y="Sub-Industry", orientation="h",
+                    color="Avg YTD (%)",
                     color_continuous_scale=["#d73027", "#fee08b", "#1a9850"],
                     color_continuous_midpoint=0,
-                    text=ranked["YTD Return (%)"].apply(lambda v: f"{v:+.2f}%"),
-                    hover_data={"Name": True, "YTD Return (%)": False},
-                    title=f"{chosen_label} — YTD Return Ranking",
-                    height=max(420, len(data) * 22),
+                    text=si_chart["Avg YTD (%)"].apply(lambda v: f"{v:+.2f}%"),
+                    title=f"{chosen_label} — Sub-Industry Avg YTD Return",
+                    height=max(380, len(grp) * 32),
                 )
-                fig_r.update_traces(textposition="outside")
-                fig_r.update_layout(coloraxis_showscale=False,
-                                    xaxis_ticksuffix="%", yaxis_title="",
-                                    xaxis_title="YTD Return (%)")
-            else:
-                ranked = data.sort_values("YTD Return (%)", ascending=False)
-                fig_r = px.bar(
-                    ranked, x="Ticker", y="YTD Return (%)", orientation="v",
-                    color="YTD Return (%)",
-                    color_continuous_scale=["#d73027", "#fee08b", "#1a9850"],
-                    color_continuous_midpoint=0,
-                    text=ranked["YTD Return (%)"].apply(lambda v: f"{v:+.2f}%"),
-                    hover_data={"Name": True, "YTD Return (%)": False},
-                    title=f"{chosen_label} — YTD Return Ranking",
-                    height=500,
+                fig_si.update_traces(textposition="outside")
+                fig_si.update_layout(coloraxis_showscale=False,
+                                     xaxis_ticksuffix="%", yaxis_title="",
+                                     xaxis_title="Avg YTD Return (%)")
+                st.plotly_chart(fig_si, use_container_width=True)
+
+                # Summary table
+                fmt_si = {
+                    "Avg YTD (%)":    "{:+.2f}%",
+                    "Median YTD (%)": "{:+.2f}%",
+                    "% Positive":     "{:.0f}%",
+                    "Avg Beta":       "{:.2f}",
+                    "Avg Vol (%)":    "{:.2f}%",
+                    "Best Ret (%)":   "{:+.2f}%",
+                    "Worst Ret (%)":  "{:+.2f}%",
+                }
+                styled_si = (
+                    grp.style
+                    .map(color_return, subset=["Avg YTD (%)", "Median YTD (%)",
+                                               "Best Ret (%)", "Worst Ret (%)"])
+                    .format(fmt_si, na_rep="—")
+                    .hide(axis="index")
                 )
-                fig_r.update_traces(textposition="outside")
-                fig_r.update_layout(coloraxis_showscale=False,
-                                    yaxis_ticksuffix="%", xaxis_title="",
-                                    yaxis_title="YTD Return (%)")
-            st.plotly_chart(fig_r, use_container_width=True)
+                st.dataframe(styled_si, use_container_width=True,
+                             height=min(35 * len(grp) + 40, 600))
 
-            # Fundamental factors toggle (after chart)
-            show_fund = st.toggle("Show fundamental factors", value=True, key="show_fund")
+            # ── Stock Rankings ────────────────────────────────────────────────
+            with tab_stocks:
+                chart_orient = st.radio("Chart orientation:", ["Horizontal", "Vertical"],
+                                        horizontal=True, key="chart_orient",
+                                        label_visibility="visible")
+                if chart_orient == "Horizontal":
+                    ranked = data.sort_values("YTD Return (%)")
+                    fig_r = px.bar(
+                        ranked, x="YTD Return (%)", y="Ticker", orientation="h",
+                        color="YTD Return (%)",
+                        color_continuous_scale=["#d73027", "#fee08b", "#1a9850"],
+                        color_continuous_midpoint=0,
+                        text=ranked["YTD Return (%)"].apply(lambda v: f"{v:+.2f}%"),
+                        hover_data={"Name": True, "YTD Return (%)": False},
+                        title=f"{chosen_label} — YTD Return Ranking",
+                        height=max(420, len(data) * 22),
+                    )
+                    fig_r.update_traces(textposition="outside")
+                    fig_r.update_layout(coloraxis_showscale=False,
+                                        xaxis_ticksuffix="%", yaxis_title="",
+                                        xaxis_title="YTD Return (%)")
+                else:
+                    ranked = data.sort_values("YTD Return (%)", ascending=False)
+                    fig_r = px.bar(
+                        ranked, x="Ticker", y="YTD Return (%)", orientation="v",
+                        color="YTD Return (%)",
+                        color_continuous_scale=["#d73027", "#fee08b", "#1a9850"],
+                        color_continuous_midpoint=0,
+                        text=ranked["YTD Return (%)"].apply(lambda v: f"{v:+.2f}%"),
+                        hover_data={"Name": True, "YTD Return (%)": False},
+                        title=f"{chosen_label} — YTD Return Ranking",
+                        height=500,
+                    )
+                    fig_r.update_traces(textposition="outside")
+                    fig_r.update_layout(coloraxis_showscale=False,
+                                        yaxis_ticksuffix="%", xaxis_title="",
+                                        yaxis_title="YTD Return (%)")
+                st.plotly_chart(fig_r, use_container_width=True)
 
-            if show_fund:
-                with st.spinner("Loading fundamentals (cached daily)…"):
-                    fund_data = get_sector_fundamentals(tickers_t)
-                data = data.merge(fund_data, on="Ticker", how="left")
+                # Fundamental factors toggle (after chart)
+                show_fund = st.toggle("Show fundamental factors", value=True, key="show_fund")
 
-            base_cols = ["Rank", "Ticker", "Name", "Sub-Industry",
-                         "YTD Return (%)", "Current Price",
-                         "52-Wk High", "52-Wk Low", "% from High", "% from Low",
-                         "Beta (1Y)", "Parkinson Vol (%)"]
-            fund_cols = ["Mkt Cap ($B)", "P/E", "Fwd P/E", "Div Yield (%)", "EPS Growth (%)"]
-            cols = base_cols + (fund_cols if show_fund else [])
-            cols = [c for c in cols if c in data.columns]
-            data = data[cols]
+                if show_fund:
+                    with st.spinner("Loading fundamentals (cached daily)…"):
+                        fund_data = get_sector_fundamentals(tickers_t)
+                    data = data.merge(fund_data, on="Ticker", how="left")
 
-            fmt = {
-                "YTD Return (%)":    "{:+.2f}%",
-                "Current Price":     "${:.2f}",
-                "52-Wk High":        "${:.2f}",
-                "52-Wk Low":         "${:.2f}",
-                "% from High":       "{:+.2f}%",
-                "% from Low":        "{:+.2f}%",
-                "Beta (1Y)":         "{:.2f}",
-                "Parkinson Vol (%)": "{:.2f}%",
-                "Mkt Cap ($B)":      "${:.1f}B",
-                "P/E":               "{:.1f}x",
-                "Fwd P/E":           "{:.1f}x",
-                "Div Yield (%)":     "{:.2f}%",
-                "EPS Growth (%)":    "{:+.1f}%",
-            }
-            fmt = {k: v for k, v in fmt.items() if k in data.columns}
+                base_cols = ["Rank", "Ticker", "Name", "Sub-Industry",
+                             "YTD Return (%)", "Current Price",
+                             "52-Wk High", "52-Wk Low", "% from High", "% from Low",
+                             "Beta (1Y)", "Parkinson Vol (%)"]
+                fund_cols = ["Mkt Cap ($B)", "P/E", "Fwd P/E", "Div Yield (%)", "EPS Growth (%)"]
+                cols = base_cols + (fund_cols if show_fund else [])
+                cols = [c for c in cols if c in data.columns]
+                data = data[cols]
 
-            styled_stocks = (
-                data.style
-                .map(color_return, subset=["YTD Return (%)", "% from High", "% from Low"])
-                .format(fmt, na_rep="—")
-                .hide(axis="index")
-            )
-            st.dataframe(styled_stocks, use_container_width=True,
-                         height=min(35 * len(data) + 40, 800))
+                fmt = {
+                    "YTD Return (%)":    "{:+.2f}%",
+                    "Current Price":     "${:.2f}",
+                    "52-Wk High":        "${:.2f}",
+                    "52-Wk Low":         "${:.2f}",
+                    "% from High":       "{:+.2f}%",
+                    "% from Low":        "{:+.2f}%",
+                    "Beta (1Y)":         "{:.2f}",
+                    "Parkinson Vol (%)": "{:.2f}%",
+                    "Mkt Cap ($B)":      "${:.1f}B",
+                    "P/E":               "{:.1f}x",
+                    "Fwd P/E":           "{:.1f}x",
+                    "Div Yield (%)":     "{:.2f}%",
+                    "EPS Growth (%)":    "{:+.1f}%",
+                }
+                fmt = {k: v for k, v in fmt.items() if k in data.columns}
+
+                styled_stocks = (
+                    data.style
+                    .map(color_return, subset=["YTD Return (%)", "% from High", "% from Low"])
+                    .format(fmt, na_rep="—")
+                    .hide(axis="index")
+                )
+                st.dataframe(styled_stocks, use_container_width=True,
+                             height=min(35 * len(data) + 40, 800))
 
 except Exception as e:
     st.error(f"Could not fetch data: {e}")
