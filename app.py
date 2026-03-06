@@ -366,15 +366,37 @@ def get_sector_fundamentals(tickers_tuple):
 # ── Layout ────────────────────────────────────────────────────────────────────
 
 # Sidebar date range
+today = date.today()
+
+PRESETS = {
+    "YTD":    date(today.year, 1, 1),
+    "1Y":     today - timedelta(days=365),
+    "2Y":     today - timedelta(days=365*2),
+    "3Y":     today - timedelta(days=365*3),
+    "5Y":     today - timedelta(days=365*5),
+    "10Y":    today - timedelta(days=365*10),
+    "Custom": None,
+}
+
+if "start_date_input" not in st.session_state:
+    st.session_state.start_date_input = PRESETS["YTD"]
+
+def on_preset_change():
+    preset_val = PRESETS[st.session_state.preset_radio]
+    if preset_val is not None:
+        st.session_state.start_date_input = preset_val
+
+def on_date_change():
+    st.session_state.preset_radio = "Custom"
+
 with st.sidebar:
     st.header("Date Range")
-    default_start = date.today() - timedelta(days=365)
-    default_end   = date.today()
-    start_date = st.date_input("Start Date", value=default_start, max_value=default_end)
-    end_date   = st.date_input("End Date",   value=default_end,   min_value=start_date)
-    st.caption("Default: 1 year rolling. Set both dates to customize the period for all charts and tables.")
-
-today = date.today()
+    start_date = st.date_input("Start Date", max_value=today, key="start_date_input", on_change=on_date_change)
+    end_date   = st.date_input("End Date", value=today, min_value=start_date, key="end_date_input", on_change=on_date_change)
+    st.radio("Quick Select", list(PRESETS.keys()), horizontal=True, index=0,
+             key="preset_radio", on_change=on_preset_change)
+    if st.session_state.get("preset_radio") == "Custom":
+        st.caption("Set Start and End Date manually above.")
 is_ytd = (start_date == date(today.year, 1, 1) and end_date == today)
 period_label = f"{start_date.strftime('%m-%d-%Y')} ->{end_date.strftime('%m-%d-%Y')}"
 
@@ -428,9 +450,13 @@ try:
     if btn_col1.button("Select All"):
         for name in all_names:
             st.session_state.line_chart_selection[name] = True
+            st.session_state[f"chk_{name}"] = True
     if btn_col2.button("Clear All"):
+        keep = {TICKERS["SPY"], TICKERS["RSP"]}
         for name in all_names:
-            st.session_state.line_chart_selection[name] = False
+            val = name in keep
+            st.session_state.line_chart_selection[name] = val
+            st.session_state[f"chk_{name}"] = val
 
     chk_cols = st.columns(4)
     for i, name in enumerate(all_names):
