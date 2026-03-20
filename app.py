@@ -1,4 +1,5 @@
 import base64
+import io
 
 import numpy as np
 import streamlit as st
@@ -167,11 +168,11 @@ def render_ytd_html(ytd_df):
         txt_style = "font-weight:bold;font-size:15px;" if is_benchmark else ""
         rows.append(f"""
         <tr style="border-bottom:1px solid rgba(128,128,128,0.2);{bg}">
-          <td style="padding:0 12px;white-space:nowrap;{txt_style}">{row['Name']}</td>
-          <td style="padding:0 12px;font-family:monospace;{txt_style}">{row['Ticker']}</td>
-          <td style="padding:0 12px;text-align:right;color:{color};font-weight:bold;white-space:nowrap;{txt_style}">
+          <td style="padding:6px 12px;white-space:nowrap;{txt_style}">{row['Name']}</td>
+          <td style="padding:6px 12px;font-family:monospace;{txt_style}">{row['Ticker']}</td>
+          <td style="padding:6px 12px;text-align:right;color:{color};font-weight:bold;white-space:nowrap;{txt_style}">
             {ytd_val:+.2f}%</td>
-          <td style="padding:0 12px">{svg}</td>
+          <td style="padding:6px 12px">{svg}</td>
         </tr>""")
 
     return f"""
@@ -254,7 +255,7 @@ def fetch_all_data(start_date: date, end_date: date):
     price_df["Name"]              = price_df["Ticker"].map(TICKERS)
     price_df = price_df.merge(ytd_df[["Ticker", "Return (%)"]], on="Ticker")
     price_df = price_df.sort_values("Return (%)", ascending=False).reset_index(drop=True)
-    price_df = price_df[["Name", "Ticker", "Current Price", "52-Wk High", "52-Wk Low",
+    price_df = price_df[["Name", "Ticker", "Return (%)", "Current Price", "52-Wk High", "52-Wk Low",
                           "% from High", "% from Low", "HL / Price", "Parkinson Vol (%)"]]
 
     # ── Daily return series ───────────────────────────────────────────────────
@@ -277,7 +278,7 @@ def get_sp500_constituents():
         headers=headers, timeout=15,
     )
     resp.raise_for_status()
-    df = pd.read_html(resp.text)[0]
+    df = pd.read_html(io.StringIO(resp.text))[0]
     df = df[["Symbol", "Security", "GICS Sector", "GICS Sub-Industry"]].copy()
     df.columns = ["Ticker", "Name", "GICS Sector", "Sub-Industry"]
     df["Ticker"] = df["Ticker"].str.replace(".", "-", regex=False)
@@ -348,9 +349,12 @@ def get_sector_stock_data(tickers_tuple, start_date: date, end_date: date):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_sector_fundamentals(tickers_tuple):
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+
     def fetch_one(ticker):
         try:
-            info = yf.Ticker(ticker).info
+            info = yf.Ticker(ticker, session=session).info
             mc   = info.get("marketCap")
             pe   = info.get("trailingPE")
             fpe  = info.get("forwardPE")
@@ -446,7 +450,7 @@ try:
         coloraxis_showscale=False,
         xaxis_tickangle=-30,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     # ── YTD line chart ────────────────────────────────────────────────────────
     st.subheader(f"Performance Over Time — {period_label}")
@@ -491,7 +495,7 @@ try:
                 selector={"name": spy_name},
                 line=dict(color="black", width=2.5),
             )
-        st.plotly_chart(line_fig, use_container_width=True)
+        st.plotly_chart(line_fig, width='stretch')
     else:
         st.info("Select at least one ETF above to display the chart.")
 
@@ -528,7 +532,7 @@ try:
                         color_discrete_map=GROUP_COLORS, height=460)
         fig_g.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
         fig_g.update_layout(legend_title="", yaxis_ticksuffix="%", xaxis_title="")
-        st.plotly_chart(fig_g, use_container_width=True)
+        st.plotly_chart(fig_g, width='stretch')
 
         # Per-group sector breakdown
         max_sectors = max(len(t) for t in GROUPS.values())
@@ -588,7 +592,7 @@ try:
 
         fig_s.update_yaxes(ticksuffix="%")
         fig_s.update_layout(height=500, showlegend=False, xaxis_title="")
-        st.plotly_chart(fig_s, use_container_width=True)
+        st.plotly_chart(fig_s, width='stretch')
 
         st.caption(
             "**Reading the chart:** Above zero = cyclical/sensitive sectors outperform defensives (risk-on). "
@@ -615,8 +619,9 @@ try:
     styled_price = (
         price_df.style
         .apply(highlight_benchmark, axis=1)
-        .map(color_return, subset=["% from High", "% from Low"])
+        .map(color_return, subset=["Return (%)", "% from High", "% from Low"])
         .format({
+            "Return (%)":         "{:+.2f}%",
             "Current Price":      "${:.2f}",
             "52-Wk High":         "${:.2f}",
             "52-Wk Low":          "${:.2f}",
@@ -627,7 +632,7 @@ try:
         })
         .hide(axis="index")
     )
-    st.dataframe(styled_price, use_container_width=True, height=490)
+    st.dataframe(styled_price, width='stretch', height=490)
 
     st.caption(
         f"Prices as of {df['As of Date'].iloc[0]}. "
@@ -650,7 +655,7 @@ try:
         sector_labels = [TICKERS[e] for e in sector_etfs]
 
         st.caption("Select a sector:")
-        chosen_label = st.radio("", sector_labels,
+        chosen_label = st.radio("Select sector", sector_labels,
                                 horizontal=True, key="sector_radio",
                                 label_visibility="collapsed")
         chosen_etf   = sector_etfs[sector_labels.index(chosen_label)]
@@ -697,8 +702,7 @@ try:
                             .rename(columns={"Ticker": "Worst", "Return (%)": "Worst Ret (%)"}))
                 grp = grp.merge(best, on="Sub-Industry").merge(worst, on="Sub-Industry")
                 grp = grp.sort_values("Avg_Ret", ascending=False).reset_index(drop=True)
-                grp.insert(0, "Rank", range(1, len(grp) + 1))
-                grp.columns = ["Rank", "Sub-Industry", "# Stocks",
+                grp.columns = ["Sub-Industry", "# Stocks",
                                 "Avg Return (%)", "Median Return (%)", "% Positive",
                                 "Avg Beta", "Avg Vol (%)",
                                 "Best", "Best Ret (%)", "Worst", "Worst Ret (%)"]
@@ -718,7 +722,7 @@ try:
                 fig_si.update_layout(coloraxis_showscale=False,
                                      xaxis_ticksuffix="%", yaxis_title="",
                                      xaxis_title="Avg Return (%)")
-                st.plotly_chart(fig_si, use_container_width=True)
+                st.plotly_chart(fig_si, width='stretch')
 
                 # Summary table
                 fmt_si = {
@@ -737,8 +741,44 @@ try:
                     .format(fmt_si, na_rep="—")
                     .hide(axis="index")
                 )
-                st.dataframe(styled_si, use_container_width=True,
-                             height=min(35 * len(grp) + 40, 600))
+                st.dataframe(styled_si, width='stretch',
+                             height=38 * len(grp) + 50)
+
+                # ── Commentary ───────────────────────────────────────────────
+                n_si        = len(grp)
+                n_positive  = (grp["Avg Return (%)"] > 0).sum()
+                n_negative  = n_si - n_positive
+                top         = grp.iloc[0]
+                bottom      = grp.iloc[-1]
+                spread      = top["Avg Return (%)"] - bottom["Avg Return (%)"]
+                best_stock  = grp.loc[grp["Best Ret (%)"].idxmax()]
+                worst_stock = grp.loc[grp["Worst Ret (%)"].idxmin()]
+                high_bread  = grp[grp["% Positive"] >= 75]
+                low_bread   = grp[grp["% Positive"] <= 25]
+
+                breadth_line = (
+                    f"{len(high_bread)} sub-industr{'y' if len(high_bread)==1 else 'ies'} "
+                    f"with ≥75% of stocks positive"
+                    if not high_bread.empty else
+                    "no sub-industries with broad positive breadth (≥75%)"
+                )
+                low_bread_line = (
+                    f"; {len(low_bread)} with ≤25% positive"
+                    if not low_bread.empty else ""
+                )
+
+                commentary = f"""
+**{gics_name} — Sub-Industry Performance Summary** &nbsp;·&nbsp; {period_label}
+
+**{n_positive} of {n_si}** sub-industries positive &nbsp;|&nbsp; **{n_negative}** negative &nbsp;|&nbsp; spread: **{spread:+.2f}%**
+
+- **Leader:** {top['Sub-Industry']} ({top['Avg Return (%)']:+.2f}% avg, {top['% Positive']:.0f}% of stocks positive) — best stock: **{top['Best']}** ({top['Best Ret (%)']:+.2f}%)
+- **Laggard:** {bottom['Sub-Industry']} ({bottom['Avg Return (%)']:+.2f}% avg, {bottom['% Positive']:.0f}% of stocks positive) — worst stock: **{bottom['Worst']}** ({bottom['Worst Ret (%)']:+.2f}%)
+- **Top individual performer:** {best_stock['Best']} ({best_stock['Best Ret (%)']:+.2f}%) in {best_stock['Sub-Industry']}
+- **Worst individual performer:** {worst_stock['Worst']} ({worst_stock['Worst Ret (%)']:+.2f}%) in {worst_stock['Sub-Industry']}
+- **Breadth:** {breadth_line}{low_bread_line}
+"""
+                st.markdown(commentary)
 
             # ── Stock Rankings ────────────────────────────────────────────────
             with tab_stocks:
@@ -777,7 +817,7 @@ try:
                     fig_r.update_layout(coloraxis_showscale=False,
                                         yaxis_ticksuffix="%", xaxis_title="",
                                         yaxis_title="Return (%)")
-                st.plotly_chart(fig_r, use_container_width=True)
+                st.plotly_chart(fig_r, width='stretch')
 
                 # Fundamental factors toggle (after chart)
                 show_fund = st.toggle("Show fundamental factors", value=True, key="show_fund")
@@ -819,7 +859,7 @@ try:
                     .format(fmt, na_rep="—")
                     .hide(axis="index")
                 )
-                st.dataframe(styled_stocks, use_container_width=True,
+                st.dataframe(styled_stocks, width='stretch',
                              height=min(35 * len(data) + 40, 800))
 
 except Exception as e:

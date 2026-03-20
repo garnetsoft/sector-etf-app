@@ -9,6 +9,8 @@ import markdown as md
 from xhtml2pdf import pisa
 from datetime import date, timedelta
 from concurrent.futures import ThreadPoolExecutor
+import datetime
+from datetime import datetime
 from dotenv import load_dotenv
 import os
 
@@ -218,7 +220,7 @@ Be specific, data-driven, and actionable. Reference actual numbers from the data
 
 # ── PDF export ───────────────────────────────────────────────────────────────
 
-def generate_pdf(sector_name, etf, start_date, end_date, analysis_text):
+def generate_pdf(sector_name, etf, start_date, end_date, analysis_text, num_stocks):
     # Convert markdown to HTML (tables extension handles | tables natively)
     body_html = md.markdown(
         analysis_text,
@@ -272,6 +274,7 @@ def generate_pdf(sector_name, etf, start_date, end_date, analysis_text):
   <div class="report-meta">
     ETF: <strong>{etf}</strong> &nbsp;|&nbsp;
     Period: <strong>{start_date.strftime('%m-%d-%Y')} &rarr; {end_date.strftime('%m-%d-%Y')}</strong> &nbsp;|&nbsp;
+    Universe: <strong>{sector_name} ({num_stocks} Stocks)</strong> &nbsp;|&nbsp;
     Generated: <strong>{date.today().strftime('%m-%d-%Y')}</strong>
   </div>
 </div>
@@ -306,11 +309,7 @@ with st.sidebar:
     model       = MODELS[model_label]
 
     st.divider()
-    st.header("Sector & Period")
-
-    sector_options = list(ETF_TO_GICS.values())
-    sector_name    = st.selectbox("Select Sector", sector_options, index=sector_options.index("Information Technology"))
-    etf            = {v: k for k, v in ETF_TO_GICS.items()}[sector_name]
+    st.header("Period")
 
     today         = date.today()
     PRESETS = {
@@ -319,7 +318,7 @@ with st.sidebar:
         "2Y":  today - timedelta(days=365*2),
         "3Y":  today - timedelta(days=365*3),
     }
-    preset     = st.radio("Quick Select", list(PRESETS.keys()), horizontal=True, index=1)
+    preset     = st.radio("Quick Select", list(PRESETS.keys()), horizontal=True, index=0)
     start_date = st.date_input("Start Date", value=PRESETS[preset], max_value=today)
     end_date   = st.date_input("End Date",   value=today, min_value=start_date)
 
@@ -330,6 +329,10 @@ with st.sidebar:
 
 st.title("Sector Investment Agent")
 st.caption(f"Powered by {model_label.split('(')[0].strip()} · S&P 500 constituents · Fundamental + Technical analysis")
+
+sector_options = list(ETF_TO_GICS.values())
+sector_name    = st.radio("Select Sector", sector_options, horizontal=True, index=0)
+etf            = {v: k for k, v in ETF_TO_GICS.items()}[sector_name]
 
 if not api_key:
     st.warning("Enter your Anthropic API key in the sidebar.")
@@ -374,7 +377,7 @@ if run:
     try:
         with client.messages.stream(
             model=model,
-            max_tokens=4096,
+            max_tokens=8192,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
             for text in stream.text_stream:
@@ -386,11 +389,11 @@ if run:
         # Token usage
         usage = stream.get_final_message().usage
         st.divider()
-        st.caption(f"Tokens used — input: {usage.input_tokens:,} · output: {usage.output_tokens:,}")
+        st.caption(f"Tokens used — input: {usage.input_tokens:,} · output: {usage.output_tokens:,} · {datetime.now()}")
 
         # PDF export
-        pdf_filename = f"{sector_name.replace(' ', '_')}_{etf}_{date.today().strftime('%m-%d-%Y')}.pdf"
-        pdf_bytes    = generate_pdf(sector_name, etf, start_date, end_date, full_text)
+        pdf_filename = f"{sector_name.replace(' ', '_')}_{etf}_{preset}_{date.today().strftime('%Y%m%d')}.pdf"
+        pdf_bytes    = generate_pdf(sector_name, etf, start_date, end_date, full_text, len(data))
         st.download_button(
             label="Export to PDF",
             data=bytes(pdf_bytes),
