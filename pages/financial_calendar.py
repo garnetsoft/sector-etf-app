@@ -80,7 +80,8 @@ view_mode = st.radio("View", ["Calendar", "Table"], horizontal=True)
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_events(tickers: tuple, lookahead: int) -> pd.DataFrame:
     today = date.today()
-    end_date = today + timedelta(days=lookahead)
+    raw_end = today + timedelta(days=lookahead)
+    end_date = raw_end.replace(day=calendar.monthrange(raw_end.year, raw_end.month)[1])
     rows = []
 
     for ticker in tickers:
@@ -200,7 +201,8 @@ with st.spinner("Fetching upcoming events…"):
 df = df_all[df_all["Event"].isin(selected_event_types)].copy() if not df_all.empty else df_all
 
 today = date.today()
-end_date = today + timedelta(days=lookahead_days)
+raw_end = today + timedelta(days=lookahead_days)
+end_date = raw_end.replace(day=calendar.monthrange(raw_end.year, raw_end.month)[1])
 
 # ── Summary metrics ───────────────────────────────────────────────────────────
 col1, col2, col3, col4 = st.columns(4)

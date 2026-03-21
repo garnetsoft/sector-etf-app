@@ -155,6 +155,35 @@ def svg_to_data_url(svg_str):
 
 
 def render_ytd_html(ytd_df):
+    has_extra = "52-Wk High" in ytd_df.columns
+
+    def _fmt_price(v):
+        try:
+            return f"${float(v):.2f}" if v == v else "—"
+        except Exception:
+            return "—"
+
+    def _fmt_pct(v, plus=False):
+        try:
+            f = float(v)
+            return ("—" if f != f else (f"{f:+.2f}%" if plus else f"{f:.2f}%"))
+        except Exception:
+            return "—"
+
+    def _fmt_ratio(v):
+        try:
+            f = float(v)
+            return "—" if f != f else f"{f:.2%}"
+        except Exception:
+            return "—"
+
+    def _pct_color(v):
+        try:
+            f = float(v)
+            return "#1a9850" if f >= 0 else "#d73027"
+        except Exception:
+            return "#888"
+
     rows = []
     for _, row in ytd_df.iterrows():
         ytd_val = row["Return (%)"]
@@ -164,27 +193,47 @@ def render_ytd_html(ytd_df):
             inline=True,
         )
         is_benchmark = row["Ticker"] in ("SPY", "RSP")
-        bg        = ""
         txt_style = "font-weight:bold;font-size:15px;" if is_benchmark else ""
+
+        extra_tds = ""
+        if has_extra:
+            hlp = row.get("Period HL/Price")
+            pv  = row.get("Parkinson Vol (%)")
+            extra_tds = (
+                f'<td style="padding:6px 12px;text-align:right;width:90px;font-family:monospace;white-space:nowrap">{_fmt_ratio(hlp)}</td>'
+                f'<td style="padding:6px 12px;text-align:right;width:90px;font-family:monospace;white-space:nowrap">{_fmt_pct(pv)}</td>'
+                f'<td style="padding:6px 12px;text-align:right;width:90px;font-family:monospace;white-space:nowrap">{_fmt_price(row.get("52-Wk Low"))}</td>'
+                f'<td style="padding:6px 12px;text-align:right;width:90px;font-family:monospace;white-space:nowrap">{_fmt_price(row.get("52-Wk High"))}</td>'
+            )
+
         rows.append(f"""
-        <tr style="border-bottom:1px solid rgba(128,128,128,0.2);{bg}">
-          <td style="padding:6px 12px;white-space:nowrap;{txt_style}">{row['Name']}</td>
-          <td style="padding:6px 12px;font-family:monospace;{txt_style}">{row['Ticker']}</td>
-          <td style="padding:6px 12px;text-align:right;color:{color};font-weight:bold;white-space:nowrap;{txt_style}">
-            {ytd_val:+.2f}%</td>
-          <td style="padding:6px 12px">{svg}</td>
+        <tr style="border-bottom:1px solid rgba(128,128,128,0.2);">
+          <td style="padding:6px 12px;width:250px;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;{txt_style}">{row['Name']}</td>
+          <td style="padding:6px 12px;width:90px;font-family:monospace;{txt_style}">{row['Ticker']}</td>
+          <td style="padding:6px 12px;text-align:right;color:{color};font-weight:bold;white-space:nowrap;{txt_style}">{ytd_val:+.2f}%</td>
+          <td style="padding:6px 12px;width:680px;min-width:680px">{svg}</td>{extra_tds}
         </tr>""")
+
+    extra_headers = ""
+    if has_extra:
+        period = ytd_df.attrs.get("period_label", "Period")
+        extra_headers = (
+            f'<th style="padding:8px 12px;text-align:right;width:90px;white-space:nowrap">HL/Price ({period})</th>'
+            f'<th style="padding:8px 12px;text-align:right;width:90px;white-space:nowrap">Parkinson Vol ({period})</th>'
+            '<th style="padding:8px 12px;text-align:right;width:90px;white-space:nowrap">52-Wk Low</th>'
+            '<th style="padding:8px 12px;text-align:right;width:90px;white-space:nowrap">52-Wk High</th>'
+        )
 
     return f"""
     <table style="width:100%;border-collapse:collapse;font-size:13px;font-family:sans-serif">
       <thead>
         <tr style="border-bottom:2px solid rgba(128,128,128,0.4)">
-          <th style="padding:8px 12px;text-align:left;white-space:nowrap">Name</th>
-          <th style="padding:8px 12px;text-align:left">Ticker</th>
-          <th style="padding:8px 12px;text-align:right;white-space:nowrap">Return</th>
+          <th style="padding:8px 12px;text-align:left;width:250px;max-width:250px">Name</th>
+          <th style="padding:8px 12px;text-align:left;width:90px">Ticker</th>
+          <th style="padding:8px 12px;text-align:right;width:90px;white-space:nowrap">Return</th>
           <th style="padding:8px 12px;text-align:left">
             Price Range &nbsp;&#8212;&nbsp; Low &nbsp;|&nbsp; &#9670; Period-Start &nbsp;|&nbsp; &#9679; Current &nbsp;|&nbsp; High
-          </th>
+          </th>{extra_headers}
         </tr>
       </thead>
       <tbody>{"".join(rows)}</tbody>
@@ -411,10 +460,10 @@ with st.sidebar:
     if st.session_state.get("preset_radio") == "Custom":
         st.caption("Set Start and End Date manually above.")
 is_ytd = (start_date == date(today.year, 1, 1) and end_date == today)
-period_label = f"{start_date.strftime('%m-%d-%Y')} ->{end_date.strftime('%m-%d-%Y')}"
+period_label = f"{start_date.strftime('%m-%d-%Y')} --> {end_date.strftime('%m-%d-%Y')}"
 
 st.title("S&P 500 Sector ETF — Returns")
-st.caption(f"Period: **{start_date.strftime('%m-%d-%Y')}** -> **{end_date.strftime('%m-%d-%Y')}**")
+st.caption(f"Period: **{start_date.strftime('%m-%d-%Y')}** --> **{end_date.strftime('%m-%d-%Y')}**")
 
 col_btn, _ = st.columns([1, 9])
 with col_btn:
@@ -604,41 +653,20 @@ try:
         color = "#1a9850" if val > 0 else "#d73027" if val < 0 else "gray"
         return f"color: {color}; font-weight: bold"
 
-    # ── Returns table (with price bar) ───────────────────────────────────────
-    st.subheader(f"Returns — {period_label}")
+    # ── Combined Returns + Price table ───────────────────────────────────────
+    st.subheader(f"Returns & Price — {period_label}")
 
-    st.markdown(render_ytd_html(df), unsafe_allow_html=True)
-
-    # ── Price & 52-week range table ───────────────────────────────────────────
-    st.subheader("Price & 52-Week Range")
-
-    def highlight_benchmark(row):
-        bg = "background-color: rgba(99,102,241,0.15)" if row["Ticker"] in ("SPY", "RSP") else ""
-        return [bg] * len(row)
-
-    styled_price = (
-        price_df.style
-        .apply(highlight_benchmark, axis=1)
-        .map(color_return, subset=["Return (%)", "% from High", "% from Low"])
-        .format({
-            "Return (%)":         "{:+.2f}%",
-            "Current Price":      "${:.2f}",
-            "52-Wk High":         "${:.2f}",
-            "52-Wk Low":          "${:.2f}",
-            "% from High":        "{:+.2f}%",
-            "% from Low":         "{:+.2f}%",
-            "HL / Price":         "{:.2%}",
-            "Parkinson Vol (%)":  "{:.2f}%",
-        })
-        .hide(axis="index")
-    )
-    st.dataframe(styled_price, width='stretch', height=490)
+    extra_cols = ["Ticker", "52-Wk High", "52-Wk Low", "Parkinson Vol (%)"]
+    combined_df = df.merge(price_df[extra_cols], on="Ticker", how="left")
+    combined_df["Period HL/Price"] = ((combined_df["Period High"] - combined_df["Period Low"]) / combined_df["Current"]).round(4)
+    combined_df.attrs["period_label"] = st.session_state.get("preset_radio", "Period")
+    st.markdown(render_ytd_html(combined_df), unsafe_allow_html=True)
 
     st.caption(
         f"Prices as of {df['As of Date'].iloc[0]}. "
-        f"Return calculated from {start_date.strftime('%m-%d-%Y')} -> {end_date.strftime('%m-%d-%Y')}. "
+        f"Return calculated from {start_date.strftime('%m-%d-%Y')} → {end_date.strftime('%m-%d-%Y')}. "
         f"52-week range based on last 252 trading days from end date. "
-        f"Price bar: gray=period range, colored fill=period-start→current, white tick=period-start, dot=current price."
+        f"Price bar: gray=period range, colored fill=period-start→current, ◆=period-start, ●=current price."
     )
 
     # ── Sector Deep Dive ──────────────────────────────────────────────────────
@@ -662,7 +690,8 @@ try:
         gics_name    = ETF_TO_GICS[chosen_etf]
 
         sector_stocks = sp500[sp500["ETF"] == chosen_etf]["Ticker"].tolist()
-        st.caption(f"**{gics_name}** · {chosen_etf} · {len(sector_stocks)} constituents")
+        n_subindustries = sp500[sp500["ETF"] == chosen_etf]["Sub-Industry"].nunique()
+        st.caption(f"**{gics_name}** · {chosen_etf} · {n_subindustries} sub-industries · {len(sector_stocks)} constituents")
 
         if sector_stocks:
             tickers_t = tuple(sorted(sector_stocks))
@@ -860,7 +889,7 @@ try:
                     .hide(axis="index")
                 )
                 st.dataframe(styled_stocks, width='stretch',
-                             height=min(35 * len(data) + 40, 800))
+                             height=35 * len(data) + 40, hide_index=True)
 
 except Exception as e:
     st.error(f"Could not fetch data: {e}")
