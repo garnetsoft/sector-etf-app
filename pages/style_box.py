@@ -303,17 +303,18 @@ with st.sidebar:
     if st.button("Refresh Data", type="primary"):
         st.cache_data.clear()
 
+preset_label = st.session_state.get("sb_preset", "Period")
+period_label = f"{start_date.strftime('%m-%d-%Y')} --> {end_date.strftime('%m-%d-%Y')}"
+
+st.title("Equity Style Box Dashboard")
+family = st.radio("Fund Family", list(FUND_FAMILIES.keys()), horizontal=True, key="sb_family")
+
 # ── Resolve active fund family config ─────────────────────────────────────────
 
 style_box = FUND_FAMILIES[family]["style_box"]
 etf_names = FUND_FAMILIES[family]["etf_names"]
 tickers   = [style_box[(c, s)] for c in CAPS for s in STYLES]
 
-preset_label = st.session_state.get("sb_preset", "Period")
-period_label = f"{start_date.strftime('%m-%d-%Y')} --> {end_date.strftime('%m-%d-%Y')}"
-
-st.title("Equity Style Box Dashboard")
-family = st.radio("Fund Family", list(FUND_FAMILIES.keys()), horizontal=True, key="sb_family")
 st.caption(
     f"**{family}** ETF 9-box grid — Value / Blend / Growth × Large / Mid / Small Cap · "
     f"Period: **{period_label}**"
