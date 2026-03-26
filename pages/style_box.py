@@ -296,9 +296,6 @@ def on_date():
     st.session_state.sb_preset = "Custom"
 
 with st.sidebar:
-    st.header("Fund Family")
-    family = st.radio("", list(FUND_FAMILIES.keys()), horizontal=True, key="sb_family", label_visibility="collapsed")
-
     st.header("Date Range")
     start_date = st.date_input("Start Date", max_value=today, key="sb_start_date", on_change=on_date)
     end_date   = st.date_input("End Date", value=today, min_value=start_date, key="sb_end_date", on_change=on_date)
@@ -316,6 +313,7 @@ preset_label = st.session_state.get("sb_preset", "Period")
 period_label = f"{start_date.strftime('%m-%d-%Y')} --> {end_date.strftime('%m-%d-%Y')}"
 
 st.title("Equity Style Box Dashboard")
+family = st.radio("Fund Family", list(FUND_FAMILIES.keys()), horizontal=True, key="sb_family")
 st.caption(
     f"**{family}** ETF 9-box grid — Value / Blend / Growth × Large / Mid / Small Cap · "
     f"Period: **{period_label}**"
