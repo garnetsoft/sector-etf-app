@@ -68,6 +68,30 @@ FUND_FAMILIES = {
             "SLYG": "SPDR S&P 600 Small Cap Growth",
         },
     },
+    "BlackRock": {
+        "style_box": {
+            ("Large", "Value"):  "IVE",
+            ("Large", "Blend"):  "IVV",
+            ("Large", "Growth"): "IVW",
+            ("Mid",   "Value"):  "IJJ",
+            ("Mid",   "Blend"):  "IJH",
+            ("Mid",   "Growth"): "IJK",
+            ("Small", "Value"):  "IJS",
+            ("Small", "Blend"):  "IJR",
+            ("Small", "Growth"): "IJT",
+        },
+        "etf_names": {
+            "IVE": "iShares S&P 500 Value",
+            "IVV": "iShares Core S&P 500",
+            "IVW": "iShares S&P 500 Growth",
+            "IJJ": "iShares S&P Mid-Cap 400 Value",
+            "IJH": "iShares Core S&P Mid-Cap",
+            "IJK": "iShares S&P Mid-Cap 400 Growth",
+            "IJS": "iShares S&P Small-Cap 600 Value",
+            "IJR": "iShares Core S&P Small-Cap",
+            "IJT": "iShares S&P Small-Cap 600 Growth",
+        },
+    },
 }
 
 
