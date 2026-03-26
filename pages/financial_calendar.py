@@ -1,53 +1,56 @@
+import calendar
+from datetime import date, timedelta
+
+import pandas as pd
 import streamlit as st
 import yfinance as yf
-import pandas as pd
-from datetime import date, timedelta
-import calendar
 
-st.set_page_config(page_title="DOW 30 Financial Calendar", layout="wide")
+from utils import ETF_TO_GICS, get_sp500_constituents
+
+st.set_page_config(page_title="Financial Calendar", layout="wide")
 
 DOW_30 = {
     "AAPL": "Apple",
     "AMGN": "Amgen",
-    "AXP": "American Express",
-    "BA": "Boeing",
-    "CAT": "Caterpillar",
-    "CRM": "Salesforce",
+    "AXP":  "American Express",
+    "BA":   "Boeing",
+    "CAT":  "Caterpillar",
+    "CRM":  "Salesforce",
     "CSCO": "Cisco",
-    "CVX": "Chevron",
-    "DIS": "Disney",
-    "DOW": "Dow Inc.",
-    "GS": "Goldman Sachs",
-    "HD": "Home Depot",
-    "HON": "Honeywell",
-    "IBM": "IBM",
+    "CVX":  "Chevron",
+    "DIS":  "Disney",
+    "DOW":  "Dow Inc.",
+    "GS":   "Goldman Sachs",
+    "HD":   "Home Depot",
+    "HON":  "Honeywell",
+    "IBM":  "IBM",
     "INTC": "Intel",
-    "JNJ": "Johnson & Johnson",
-    "JPM": "JPMorgan Chase",
-    "KO": "Coca-Cola",
-    "MCD": "McDonald's",
-    "MMM": "3M",
-    "MRK": "Merck",
+    "JNJ":  "Johnson & Johnson",
+    "JPM":  "JPMorgan Chase",
+    "KO":   "Coca-Cola",
+    "MCD":  "McDonald's",
+    "MMM":  "3M",
+    "MRK":  "Merck",
     "MSFT": "Microsoft",
-    "NKE": "Nike",
-    "PG": "Procter & Gamble",
-    "SHW": "Sherwin-Williams",
-    "TRV": "Travelers",
-    "UNH": "UnitedHealth",
-    "V": "Visa",
-    "VZ": "Verizon",
-    "WMT": "Walmart",
+    "NKE":  "Nike",
+    "PG":   "Procter & Gamble",
+    "SHW":  "Sherwin-Williams",
+    "TRV":  "Travelers",
+    "UNH":  "UnitedHealth",
+    "V":    "Visa",
+    "VZ":   "Verizon",
+    "WMT":  "Walmart",
 }
 
 EVENT_COLORS = {
-    "Earnings": "#4C9BE8",
-    "Ex-Dividend": "#F4A261",
+    "Earnings":         "#4C9BE8",
+    "Ex-Dividend":      "#F4A261",
     "Dividend Payment": "#2A9D8F",
-    "Split": "#E76F51",
+    "Split":            "#E76F51",
 }
 
-st.title("DOW 30 Financial Calendar")
-st.caption("Upcoming earnings, dividends, and corporate actions for Dow Jones Industrial Average components.")
+st.title("Financial Calendar")
+st.caption("Upcoming earnings, dividends, and corporate actions.")
 
 # ── Legend ─────────────────────────────────────────────────────────────────────
 legend_cols = st.columns(len(EVENT_COLORS))
@@ -59,14 +62,36 @@ for col, (etype, color) in zip(legend_cols, EVENT_COLORS.items()):
 
 st.markdown("---")
 
+# ── Universe selector ──────────────────────────────────────────────────────────
+universe = st.radio("Universe", ["DOW 30", "S&P 500 Sector"], horizontal=True)
+
+if universe == "DOW 30":
+    company_names = DOW_30
+    ticker_pool   = list(DOW_30.keys())
+else:
+    sector_label = st.selectbox("Sector", list(ETF_TO_GICS.values()))
+    etf_ticker   = {v: k for k, v in ETF_TO_GICS.items()}[sector_label]
+
+    with st.spinner("Loading S&P 500 constituents..."):
+        sp500 = get_sp500_constituents()
+
+    sector_df     = sp500[sp500["ETF"] == etf_ticker]
+    company_names = dict(zip(sector_df["Ticker"], sector_df["Name"]))
+    ticker_pool   = sorted(company_names.keys())
+
+    if len(ticker_pool) > 30:
+        st.caption(f"{len(ticker_pool)} stocks in {sector_label}. Showing all — fetching may take a moment.")
+
 # ── Controls ───────────────────────────────────────────────────────────────────
-lookahead_map = {"1M": 30, "2M": 60, "3M": 90, "6M": 180, "1Y": 365}
+lookahead_map    = {"1M": 30, "2M": 60, "3M": 90, "6M": 180, "1Y": 365}
 lookahead_choice = st.radio("Lookahead", list(lookahead_map.keys()), horizontal=True)
-lookahead_days = lookahead_map[lookahead_choice]
+lookahead_days   = lookahead_map[lookahead_choice]
+
 selected_tickers = st.multiselect(
     "Companies",
-    options=list(DOW_30.keys()),
-    default=list(DOW_30.keys()),
+    options=ticker_pool,
+    default=ticker_pool,
+    format_func=lambda t: f"{t} — {company_names.get(t, t)}",
 )
 selected_event_types = st.multiselect(
     "Event Types",
@@ -75,20 +100,22 @@ selected_event_types = st.multiselect(
 )
 view_mode = st.radio("View", ["Calendar", "Table"], horizontal=True)
 
+
 # ── Data fetching ─────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_events(tickers: tuple, lookahead: int) -> pd.DataFrame:
-    today = date.today()
-    raw_end = today + timedelta(days=lookahead)
+def fetch_events(tickers: tuple, lookahead: int, names_key: str) -> pd.DataFrame:
+    """names_key is a stable cache key representing the company_names dict."""
+    today    = date.today()
+    raw_end  = today + timedelta(days=lookahead)
     end_date = raw_end.replace(day=calendar.monthrange(raw_end.year, raw_end.month)[1])
-    rows = []
+    rows     = []
 
     for ticker in tickers:
         try:
             tk = yf.Ticker(ticker)
 
-            # --- Earnings (from earnings_dates — future rows have NaN Reported EPS) ---
+            # Earnings
             try:
                 ed_df = tk.earnings_dates
                 if ed_df is not None and not ed_df.empty:
@@ -98,66 +125,59 @@ def fetch_events(tickers: tuple, lookahead: int) -> pd.DataFrame:
                             ed = pd.to_datetime(idx).date()
                             if today <= ed <= end_date:
                                 rows.append({
-                                    "Date": ed,
-                                    "Ticker": ticker,
-                                    "Company": DOW_30[ticker],
-                                    "Event": "Earnings",
-                                    "Detail": f"Est. EPS: {future.loc[idx, 'EPS Estimate']:.2f}"
-                                              if pd.notna(future.loc[idx, "EPS Estimate"]) else "",
+                                    "Date":    ed,
+                                    "Ticker":  ticker,
+                                    "Event":   "Earnings",
+                                    "Detail":  f"Est. EPS: {future.loc[idx, 'EPS Estimate']:.2f}"
+                                               if pd.notna(future.loc[idx, "EPS Estimate"]) else "",
                                 })
                         except Exception:
                             pass
             except Exception:
                 pass
 
-            # --- Calendar dict: ex-dividend and dividend payment dates ---
+            # Ex-dividend and payment date
             try:
                 cal = tk.calendar
                 if isinstance(cal, dict):
-                    # Ex-dividend date
                     ex_div = cal.get("Ex-Dividend Date")
                     if ex_div:
                         ex_div = pd.to_datetime(ex_div).date()
                         if today <= ex_div <= end_date:
-                            # get latest dividend amount from history
                             try:
-                                divs = tk.dividends
+                                divs   = tk.dividends
                                 amount = divs.iloc[-1] if not divs.empty else None
                             except Exception:
                                 amount = None
                             rows.append({
-                                "Date": ex_div,
+                                "Date":   ex_div,
                                 "Ticker": ticker,
-                                "Company": DOW_30[ticker],
-                                "Event": "Ex-Dividend",
+                                "Event":  "Ex-Dividend",
                                 "Detail": f"${amount:.4f}" if amount else "",
                             })
 
-                    # Dividend payment date
                     div_date = cal.get("Dividend Date")
                     if div_date:
                         div_date = pd.to_datetime(div_date).date()
                         if today <= div_date <= end_date:
                             try:
-                                divs = tk.dividends
+                                divs   = tk.dividends
                                 amount = divs.iloc[-1] if not divs.empty else None
                             except Exception:
                                 amount = None
                             rows.append({
-                                "Date": div_date,
+                                "Date":   div_date,
                                 "Ticker": ticker,
-                                "Company": DOW_30[ticker],
-                                "Event": "Dividend Payment",
+                                "Event":  "Dividend Payment",
                                 "Detail": f"${amount:.4f}" if amount else "",
                             })
             except Exception:
                 pass
 
-            # --- Stock splits from actions ---
+            # Stock splits
             try:
                 actions = tk.actions
                 if actions is not None and not actions.empty:
-                    # Normalize timezone-aware index to plain dates
                     dates = actions.index.tz_localize(None) if actions.index.tzinfo is None else actions.index.tz_convert(None)
                     actions = actions.copy()
                     actions.index = pd.DatetimeIndex(dates).normalize()
@@ -168,10 +188,9 @@ def fetch_events(tickers: tuple, lookahead: int) -> pd.DataFrame:
                         split_val = row.get("Stock Splits", 0)
                         if split_val not in (0, 1):
                             rows.append({
-                                "Date": idx.date(),
+                                "Date":   idx.date(),
                                 "Ticker": ticker,
-                                "Company": DOW_30[ticker],
-                                "Event": "Split",
+                                "Event":  "Split",
                                 "Detail": f"{split_val:.2f}:1",
                             })
             except Exception:
@@ -181,12 +200,11 @@ def fetch_events(tickers: tuple, lookahead: int) -> pd.DataFrame:
             pass
 
     if not rows:
-        return pd.DataFrame(columns=["Date", "Ticker", "Company", "Event", "Detail"])
+        return pd.DataFrame(columns=["Date", "Ticker", "Event", "Detail"])
 
     df = pd.DataFrame(rows)
     df["Date"] = pd.to_datetime(df["Date"])
-    df = df.drop_duplicates().sort_values("Date")
-    return df
+    return df.drop_duplicates().sort_values("Date")
 
 
 # ── Load data ─────────────────────────────────────────────────────────────────
@@ -194,23 +212,28 @@ if not selected_tickers:
     st.warning("Select at least one company above.")
     st.stop()
 
-with st.spinner("Fetching upcoming events…"):
-    df_all = fetch_events(tuple(sorted(selected_tickers)), lookahead_days)
+# Use universe+sector as part of cache key so switching universe invalidates cache
+cache_key = f"{universe}:{','.join(sorted(selected_tickers))}"
+with st.spinner("Fetching upcoming events..."):
+    df_all = fetch_events(tuple(sorted(selected_tickers)), lookahead_days, cache_key)
 
-# Apply event-type filter
+# Add company name column
+if not df_all.empty:
+    df_all["Company"] = df_all["Ticker"].map(lambda t: company_names.get(t, t))
+
 df = df_all[df_all["Event"].isin(selected_event_types)].copy() if not df_all.empty else df_all
 
-today = date.today()
+today   = date.today()
 raw_end = today + timedelta(days=lookahead_days)
-end_date = raw_end.replace(day=calendar.monthrange(raw_end.year, raw_end.month)[1])
+end_dt  = raw_end.replace(day=calendar.monthrange(raw_end.year, raw_end.month)[1])
 
 # ── Summary metrics ───────────────────────────────────────────────────────────
 col1, col2, col3, col4 = st.columns(4)
 counts = df["Event"].value_counts() if not df.empty else {}
-col1.metric("Earnings", counts.get("Earnings", 0))
-col2.metric("Ex-Dividend", counts.get("Ex-Dividend", 0))
+col1.metric("Earnings",         counts.get("Earnings",         0))
+col2.metric("Ex-Dividend",      counts.get("Ex-Dividend",      0))
 col3.metric("Dividend Payment", counts.get("Dividend Payment", 0))
-col4.metric("Splits", counts.get("Split", 0))
+col4.metric("Splits",           counts.get("Split",            0))
 
 st.markdown("---")
 
@@ -227,14 +250,10 @@ def color_event(val):
 
 if view_mode == "Table":
     display = df.copy()
-    display["Date"] = display["Date"].dt.strftime("%Y-%m-%d")
-    display["Days Away"] = (
-        pd.to_datetime(display["Date"]) - pd.Timestamp(today)
-    ).dt.days
+    display["Date"]      = display["Date"].dt.strftime("%Y-%m-%d")
+    display["Days Away"] = (pd.to_datetime(display["Date"]) - pd.Timestamp(today)).dt.days
 
-    # Group by week
-    st.subheader(f"Events: {today.strftime('%b %d')} – {end_date.strftime('%b %d, %Y')}")
-
+    st.subheader(f"Events: {today.strftime('%b %d')} – {end_dt.strftime('%b %d, %Y')}")
     styled = (
         display[["Date", "Days Away", "Ticker", "Company", "Event", "Detail"]]
         .reset_index(drop=True)
@@ -244,20 +263,17 @@ if view_mode == "Table":
     st.dataframe(styled, use_container_width=True, height=600)
 
 else:  # Calendar view
-    # Build month grids for all months in range
     months_in_range = sorted(
         set((df["Date"].dt.year * 100 + df["Date"].dt.month).unique())
     )
 
-    # Build event lookup: date -> list of (ticker, event)
     event_map: dict[date, list] = {}
     for _, row in df.iterrows():
         d = row["Date"].date()
         event_map.setdefault(d, []).append((row["Ticker"], row["Event"]))
 
     def render_month_html(year: int, month: int) -> str:
-        """Return a self-contained HTML table for one month."""
-        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        day_names    = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         header_cells = "".join(
             f'<th style="text-align:center;padding:4px 2px;font-size:0.8em;color:#888">{d}</th>'
             for d in day_names
@@ -269,14 +285,12 @@ else:  # Calendar view
                 if day_num == 0:
                     cells += '<td style="padding:4px 2px;vertical-align:top;min-width:60px"></td>'
                 else:
-                    d = date(year, month, day_num)
-                    is_today = d == today
-                    num_style = (
-                        "font-weight:700;color:#4C9BE8" if is_today else "font-weight:700;color:#ddd"
-                    )
-                    chips = ""
+                    d         = date(year, month, day_num)
+                    is_today  = d == today
+                    num_style = "font-weight:700;color:#4C9BE8" if is_today else "font-weight:700;color:#ddd"
+                    chips     = ""
                     for ticker, etype in event_map.get(d, []):
-                        color = EVENT_COLORS.get(etype, "#888")
+                        color  = EVENT_COLORS.get(etype, "#888")
                         chips += (
                             f'<div style="background:{color};border-radius:3px;padding:1px 4px;'
                             f'color:white;font-size:0.68em;margin-top:2px;white-space:nowrap;overflow:hidden;">'
@@ -303,6 +317,6 @@ else:  # Calendar view
     MONTHS_PER_ROW = 3
     for i in range(0, len(months_in_range), MONTHS_PER_ROW):
         chunk = months_in_range[i : i + MONTHS_PER_ROW]
-        cols = st.columns(len(chunk))
+        cols  = st.columns(len(chunk))
         for col, ym in zip(cols, chunk):
             col.markdown(render_month_html(ym // 100, ym % 100), unsafe_allow_html=True)

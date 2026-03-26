@@ -1,63 +1,59 @@
-import streamlit as st
-import anthropic
-import yfinance as yf
-import pandas as pd
-import numpy as np
-import requests
 import io
+import json
+import os
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta
+
+import anthropic
+import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
+import yfinance as yf
+from dotenv import load_dotenv
 import markdown as md
 from xhtml2pdf import pisa
-from datetime import date, timedelta
-from concurrent.futures import ThreadPoolExecutor
-import datetime
-from datetime import datetime
-from dotenv import load_dotenv
-import os
+
+from utils import ETF_TO_GICS, MODELS, estimate_cost, get_sp500_constituents
 
 load_dotenv()
 
 st.set_page_config(page_title="Sector Investment Agent", layout="wide")
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "sector_analyses.json")
 
-ETF_TO_GICS = {
-    "XLC":  "Communication Services",
-    "XLE":  "Energy",
-    "XLI":  "Industrials",
-    "XLK":  "Information Technology",
-    "XLB":  "Materials",
-    "XLF":  "Financials",
-    "XLRE": "Real Estate",
-    "XLY":  "Consumer Discretionary",
-    "XLP":  "Consumer Staples",
-    "XLU":  "Utilities",
-    "XLV":  "Health Care",
-}
 
-MODELS = {
-    "Claude Sonnet 4.6 (Recommended)": "claude-sonnet-4-6",
-    "Claude Opus 4.6 (Most Capable)":  "claude-opus-4-6",
-    "Claude Haiku 4.5 (Fastest)":      "claude-haiku-4-5-20251001",
-}
+# ── History helpers ────────────────────────────────────────────────────────────
+
+def load_history() -> list:
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE) as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def save_analysis(sector, etf, start_date, end_date, preset, model_id, analysis, usage):
+    history = load_history()
+    history.append({
+        "timestamp":     datetime.now().isoformat(timespec="seconds"),
+        "sector":        sector,
+        "etf":           etf,
+        "start_date":    start_date.isoformat(),
+        "end_date":      end_date.isoformat(),
+        "preset":        preset,
+        "model":         model_id,
+        "analysis":      analysis,
+        "input_tokens":  usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+    })
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=2)
+
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_sp500_constituents():
-    gics_to_etf = {v: k for k, v in ETF_TO_GICS.items()}
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    resp = requests.get(
-        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-        headers=headers, timeout=15,
-    )
-    resp.raise_for_status()
-    df = pd.read_html(resp.text)[0]
-    df = df[["Symbol", "Security", "GICS Sector", "GICS Sub-Industry"]].copy()
-    df.columns = ["Ticker", "Name", "GICS Sector", "Sub-Industry"]
-    df["Ticker"] = df["Ticker"].str.replace(".", "-", regex=False)
-    df["ETF"]    = df["GICS Sector"].map(gics_to_etf)
-    return df.dropna(subset=["ETF"]).reset_index(drop=True)
-
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_price_data(tickers_tuple, start_date: date, end_date: date):
@@ -149,7 +145,6 @@ def get_fundamentals(tickers_tuple):
 def build_prompt(sector_name, etf, start_date, end_date, data, sp500):
     period = f"{start_date.strftime('%m-%d-%Y')} -> {end_date.strftime('%m-%d-%Y')}"
 
-    # Sub-industry summary
     grp = (
         data.groupby("Sub-Industry")
         .agg(
@@ -163,14 +158,13 @@ def build_prompt(sector_name, etf, start_date, end_date, data, sp500):
     )
     sub_industry_text = grp.to_string(index=False)
 
-    # Stock table
     cols = ["Ticker", "Name", "Sub-Industry", "Mkt Cap ($B)", "Return (%)",
             "% from High", "% from Low", "Beta", "Parkinson Vol",
             "P/E", "Fwd P/E", "Div Yield (%)", "EPS Growth (%)"]
     cols = [c for c in cols if c in data.columns]
     stock_text = data[cols].sort_values("Return (%)", ascending=False).to_string(index=False)
 
-    prompt = f"""You are an expert investment analyst with deep expertise in the {sector_name} sector.
+    return f"""You are an expert investment analyst with deep expertise in the {sector_name} sector.
 
 CRITICAL RULE: Your analysis must be COMPLETELY ISOLATED to the {sector_name} sector. Do not compare with, reference, or consider any other sectors whatsoever. Treat this sector as if it is the only sector that exists.
 
@@ -215,13 +209,11 @@ For each:
 
 Be specific, data-driven, and actionable. Reference actual numbers from the data provided.
 """
-    return prompt
 
 
 # ── PDF export ───────────────────────────────────────────────────────────────
 
 def generate_pdf(sector_name, etf, start_date, end_date, analysis_text, num_stocks):
-    # Convert markdown to HTML (tables extension handles | tables natively)
     body_html = md.markdown(
         analysis_text,
         extensions=["tables", "nl2br", "fenced_code"],
@@ -232,35 +224,21 @@ def generate_pdf(sector_name, etf, start_date, end_date, analysis_text, num_stoc
 <head>
 <meta charset="utf-8">
 <style>
-  @page {{
-    size: A4;
-    margin: 20mm 15mm 20mm 15mm;
-  }}
-
+  @page {{ size: A4; margin: 20mm 15mm 20mm 15mm; }}
   body   {{ font-family: Helvetica, Arial, sans-serif; font-size: 10pt; color: #222; line-height: 1.5; }}
-
-  /* Header block */
   .report-header  {{ margin-bottom: 12px; border-bottom: 2px solid #1e3a5f; padding-bottom: 8px; }}
   .report-title   {{ font-size: 18pt; font-weight: bold; color: #1e3a5f; margin: 0 0 4px 0; }}
   .report-meta    {{ font-size: 9pt; color: #666; }}
-
-  /* Headings */
   h1 {{ font-size: 15pt; color: #1e3a5f; border-bottom: 1px solid #c0c8d8; padding-bottom: 3px; margin-top: 14px; }}
   h2 {{ font-size: 13pt; color: #fff; background-color: #1e3a5f; padding: 4px 8px; margin-top: 14px; }}
   h3 {{ font-size: 11pt; color: #1e3a5f; margin-top: 10px; border-left: 3px solid #1e3a5f; padding-left: 6px; }}
   h4 {{ font-size: 10pt; color: #333; margin-top: 8px; }}
-
-  /* Tables */
   table  {{ border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 8.5pt; }}
   th     {{ background-color: #1e3a5f; color: #fff; padding: 5px 7px; text-align: left; font-weight: bold; }}
   td     {{ padding: 4px 7px; border-bottom: 1px solid #ddd; vertical-align: top; }}
   tr:nth-child(even) td {{ background-color: #f2f5fa; }}
-
-  /* Lists */
   ul, ol {{ margin: 4px 0 8px 0; padding-left: 18px; }}
   li     {{ margin: 3px 0; }}
-
-  /* Misc */
   strong {{ color: #1e3a5f; }}
   hr     {{ border: none; border-top: 1px solid #ccc; margin: 10px 0; }}
   p      {{ margin: 5px 0; }}
@@ -268,7 +246,6 @@ def generate_pdf(sector_name, etf, start_date, end_date, analysis_text, num_stoc
 </style>
 </head>
 <body>
-
 <div class="report-header">
   <div class="report-title">{sector_name} Sector &mdash; Investment Analysis</div>
   <div class="report-meta">
@@ -278,14 +255,11 @@ def generate_pdf(sector_name, etf, start_date, end_date, analysis_text, num_stoc
     Generated: <strong>{date.today().strftime('%m-%d-%Y')}</strong>
   </div>
 </div>
-
 {body_html}
-
 <hr>
 <p style="font-size:7pt; color:#999; text-align:center;">
   Generated by Sector Investment Agent &nbsp;|&nbsp; {date.today().strftime('%m-%d-%Y')} &nbsp;|&nbsp; For informational purposes only. Not financial advice.
 </p>
-
 </body>
 </html>"""
 
@@ -299,11 +273,12 @@ def generate_pdf(sector_name, etf, start_date, end_date, analysis_text, num_stoc
 with st.sidebar:
     st.header("Agent Settings")
 
-    api_key = st.text_input(
-        "Anthropic API Key",
-        value=os.getenv("ANTHROPIC_API_KEY", ""),
-        type="password",
-    )
+    # Silent API key: show input only if not in env
+    _env_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if _env_key:
+        api_key = _env_key
+    else:
+        api_key = st.text_input("Anthropic API Key", type="password")
 
     model_label = st.selectbox("Model", list(MODELS.keys()))
     model       = MODELS[model_label]
@@ -311,7 +286,7 @@ with st.sidebar:
     st.divider()
     st.header("Period")
 
-    today         = date.today()
+    today   = date.today()
     PRESETS = {
         "YTD": date(today.year, 1, 1),
         "1Y":  today - timedelta(days=365),
@@ -321,6 +296,15 @@ with st.sidebar:
     preset     = st.radio("Quick Select", list(PRESETS.keys()), horizontal=True, index=0)
     start_date = st.date_input("Start Date", value=PRESETS[preset], max_value=today)
     end_date   = st.date_input("End Date",   value=today, min_value=start_date)
+
+    st.divider()
+    extended_thinking = st.toggle(
+        "Extended Thinking",
+        value=False,
+        help="Claude reasons step-by-step before answering. Slower but deeper analysis. Requires Sonnet or Opus.",
+    )
+    if extended_thinking:
+        thinking_budget = st.slider("Thinking budget (tokens)", 2000, 10000, 5000, 1000)
 
     st.divider()
     run = st.button("Run Analysis", type="primary", use_container_width=True)
@@ -339,7 +323,6 @@ if not api_key:
     st.stop()
 
 if run:
-    # Load data
     with st.spinner("Loading S&P 500 constituents..."):
         sp500 = get_sp500_constituents()
 
@@ -364,34 +347,64 @@ if run:
     data["Sub-Industry"] = data["Ticker"].map(lambda t: name_map.get(t, {}).get("Sub-Industry", ""))
     data = data.sort_values("Return (%)", ascending=False).reset_index(drop=True)
 
-    st.success(f"Data loaded. Running {model_label.split('(')[0].strip()} analysis...")
+    model_name = model_label.split('(')[0].strip()
+    st.success(f"Data loaded. Running {model_name} analysis{'  (extended thinking on)' if extended_thinking else ''}...")
     st.divider()
 
-    # Stream analysis
     prompt = build_prompt(sector_name, etf, start_date, end_date, data, sp500)
     client = anthropic.Anthropic(api_key=api_key)
-
-    output = st.empty()
     full_text = ""
+    usage = None
 
     try:
-        with client.messages.stream(
-            model=model,
-            max_tokens=8192,
-            messages=[{"role": "user", "content": prompt}],
-        ) as stream:
-            for text in stream.text_stream:
-                full_text += text
-                output.markdown(full_text + "▌")
+        if extended_thinking:
+            with st.spinner("Thinking deeply... this may take a minute."):
+                response = client.messages.create(
+                    model=model,
+                    max_tokens=thinking_budget + 8192,
+                    thinking={"type": "enabled", "budget_tokens": thinking_budget},
+                    messages=[{"role": "user", "content": prompt}],
+                )
 
-        output.markdown(full_text)
+            thinking_text = ""
+            for block in response.content:
+                if block.type == "thinking":
+                    thinking_text = block.thinking
+                elif block.type == "text":
+                    full_text = block.text
 
-        # Token usage
-        usage = stream.get_final_message().usage
+            if thinking_text:
+                with st.expander("Claude's reasoning (extended thinking)", expanded=False):
+                    st.markdown(thinking_text)
+
+            st.markdown(full_text)
+            usage = response.usage
+
+        else:
+            output = st.empty()
+            with client.messages.stream(
+                model=model,
+                max_tokens=8192,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                for text in stream.text_stream:
+                    full_text += text
+                    output.markdown(full_text + "▌")
+            output.markdown(full_text)
+            usage = stream.get_final_message().usage
+
+        # ── Token usage + cost ────────────────────────────────────────────────
+        cost_str = estimate_cost(model, usage.input_tokens, usage.output_tokens)
         st.divider()
-        st.caption(f"Tokens used — input: {usage.input_tokens:,} · output: {usage.output_tokens:,} · {datetime.now()}")
+        st.caption(
+            f"Tokens — input: {usage.input_tokens:,} · output: {usage.output_tokens:,} · "
+            f"est. cost: {cost_str} · {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
 
-        # PDF export
+        # ── Save to history ───────────────────────────────────────────────────
+        save_analysis(sector_name, etf, start_date, end_date, preset, model, full_text, usage)
+
+        # ── PDF export ────────────────────────────────────────────────────────
         pdf_filename = f"{sector_name.replace(' ', '_')}_{etf}_{preset}_{date.today().strftime('%Y%m%d')}.pdf"
         pdf_bytes    = generate_pdf(sector_name, etf, start_date, end_date, full_text, len(data))
         st.download_button(
@@ -406,6 +419,7 @@ if run:
         st.error("Invalid API key.")
     except Exception as e:
         st.error(f"Error: {e}")
+
 else:
     st.markdown("""
     ### How to use
@@ -420,3 +434,26 @@ else:
     - **Stocks to avoid** with reasoning
     - **Overall sector verdict** with conviction level
     """)
+
+# ── Analysis History ──────────────────────────────────────────────────────────
+
+history = load_history()
+if history:
+    st.divider()
+    st.subheader("Analysis History")
+
+    # Reverse-chronological
+    for entry in reversed(history[-20:]):
+        ts      = entry.get("timestamp", "")[:16].replace("T", " ")
+        sec     = entry.get("sector", "")
+        etf_lbl = entry.get("etf", "")
+        mdl     = entry.get("model", "").replace("claude-", "").replace("-", " ")
+        inp     = entry.get("input_tokens", 0)
+        out     = entry.get("output_tokens", 0)
+        cost    = estimate_cost(entry.get("model", ""), inp, out)
+        label   = f"{ts}  ·  {sec} ({etf_lbl})  ·  {mdl}  ·  {cost}"
+
+        with st.expander(label, expanded=False):
+            if entry.get("analysis"):
+                st.markdown(entry["analysis"])
+            st.caption(f"Period: {entry.get('start_date')} → {entry.get('end_date')}  ·  Tokens: {inp:,} in / {out:,} out")
