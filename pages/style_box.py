@@ -13,45 +13,76 @@ st.set_page_config(page_title="Equity Style Box", layout="wide")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-STYLE_BOX = {
-    ("Large", "Value"):  "VTV",
-    ("Large", "Blend"):  "VOO",
-    ("Large", "Growth"): "VUG",
-    ("Mid",   "Value"):  "VOE",
-    ("Mid",   "Blend"):  "VO",
-    ("Mid",   "Growth"): "VOT",
-    ("Small", "Value"):  "VBR",
-    ("Small", "Blend"):  "VB",
-    ("Small", "Growth"): "VBK",
-}
-
-ETF_NAMES = {
-    "VTV": "Vanguard Value",
-    "VOO": "Vanguard S&P 500",
-    "VUG": "Vanguard Growth",
-    "VOE": "Vanguard Mid Value",
-    "VO":  "Vanguard Mid-Cap",
-    "VOT": "Vanguard Mid Growth",
-    "VBR": "Vanguard Small Value",
-    "VB":  "Vanguard Small-Cap",
-    "VBK": "Vanguard Small Growth",
-}
-
 CAPS   = ["Large", "Mid", "Small"]
 STYLES = ["Value", "Blend", "Growth"]
-TICKERS = [STYLE_BOX[(c, s)] for c in CAPS for s in STYLES]
 
 STYLE_COLORS = {"Value": "#3b82f6", "Blend": "#6b7280", "Growth": "#f59e0b"}
 CAP_COLORS   = {"Large": "#1e3a5f", "Mid": "#2563eb", "Small": "#93c5fd"}
 
+FUND_FAMILIES = {
+    "Vanguard": {
+        "style_box": {
+            ("Large", "Value"):  "VTV",
+            ("Large", "Blend"):  "VOO",
+            ("Large", "Growth"): "VUG",
+            ("Mid",   "Value"):  "VOE",
+            ("Mid",   "Blend"):  "VO",
+            ("Mid",   "Growth"): "VOT",
+            ("Small", "Value"):  "VBR",
+            ("Small", "Blend"):  "VB",
+            ("Small", "Growth"): "VBK",
+        },
+        "etf_names": {
+            "VTV": "Vanguard Value",
+            "VOO": "Vanguard S&P 500",
+            "VUG": "Vanguard Growth",
+            "VOE": "Vanguard Mid Value",
+            "VO":  "Vanguard Mid-Cap",
+            "VOT": "Vanguard Mid Growth",
+            "VBR": "Vanguard Small Value",
+            "VB":  "Vanguard Small-Cap",
+            "VBK": "Vanguard Small Growth",
+        },
+    },
+    "SPDR": {
+        "style_box": {
+            ("Large", "Value"):  "SPYV",
+            ("Large", "Blend"):  "SPY",
+            ("Large", "Growth"): "SPYG",
+            ("Mid",   "Value"):  "MDYV",
+            ("Mid",   "Blend"):  "SPMD",
+            ("Mid",   "Growth"): "MDYG",
+            ("Small", "Value"):  "SLYV",
+            ("Small", "Blend"):  "SPSM",
+            ("Small", "Growth"): "SLYG",
+        },
+        "etf_names": {
+            "SPYV": "SPDR Portfolio S&P 500 Value",
+            "SPY":  "SPDR S&P 500",
+            "SPYG": "SPDR Portfolio S&P 500 Growth",
+            "MDYV": "SPDR S&P MidCap 400 Value",
+            "SPMD": "SPDR Portfolio S&P 400 Mid Cap",
+            "MDYG": "SPDR S&P MidCap 400 Growth",
+            "SLYV": "SPDR S&P 600 Small Cap Value",
+            "SPSM": "SPDR Portfolio S&P 600 Small Cap",
+            "SLYG": "SPDR S&P 600 Small Cap Growth",
+        },
+    },
+}
+
+
 # ── Data fetching ─────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600, show_spinner="Downloading price data...")
-def fetch_data(start_date: date, end_date: date):
+def fetch_data(start_date: date, end_date: date, tickers_tuple: tuple, family: str):
+    tickers   = list(tickers_tuple)
+    style_box = FUND_FAMILIES[family]["style_box"]
+    etf_names = FUND_FAMILIES[family]["etf_names"]
+
     fetch_start = (start_date - timedelta(days=10)).isoformat()
     fetch_end   = (end_date   + timedelta(days=1)).isoformat()
 
-    ohlcv = yf.download(TICKERS, start=fetch_start, end=fetch_end, auto_adjust=True, progress=False)
+    ohlcv = yf.download(tickers, start=fetch_start, end=fetch_end, auto_adjust=True, progress=False)
     raw   = ohlcv["Close"]
     raw_h = ohlcv["High"]
     raw_l = ohlcv["Low"]
@@ -62,36 +93,34 @@ def fetch_data(start_date: date, end_date: date):
     latest     = period_raw.iloc[-1]
     as_of      = period_raw.index[-1].date()
 
-    ret     = ((latest - base) / base * 100).round(2)
-    window  = raw[raw.index.date <= end_date].tail(252)
-    wk52_h  = window[TICKERS].max()
-    wk52_l  = window[TICKERS].min()
-    log_hl  = np.log(raw_h[TICKERS] / raw_l[TICKERS])
+    ret      = ((latest - base) / base * 100).round(2)
+    window   = raw[raw.index.date <= end_date].tail(252)
+    wk52_h   = window[tickers].max()
+    wk52_l   = window[tickers].min()
+    log_hl   = np.log(raw_h[tickers] / raw_l[tickers])
     park_vol = (np.sqrt((log_hl**2).mean() / (4 * np.log(2)) * 252) * 100).round(2)
 
     summary = pd.DataFrame({
-        "Ticker":            TICKERS,
-        "Return (%)":        ret[TICKERS].round(2).values,
-        "Current":           latest[TICKERS].round(2).values,
-        "Year Start":        base[TICKERS].round(2).values,
-        "Period High":       period_raw[TICKERS].max().round(2).values,
-        "Period Low":        period_raw[TICKERS].min().round(2).values,
+        "Ticker":            tickers,
+        "Return (%)":        ret[tickers].round(2).values,
+        "Current":           latest[tickers].round(2).values,
+        "Year Start":        base[tickers].round(2).values,
+        "Period High":       period_raw[tickers].max().round(2).values,
+        "Period Low":        period_raw[tickers].min().round(2).values,
         "52-Wk High":        wk52_h.round(2).values,
         "52-Wk Low":         wk52_l.round(2).values,
         "Parkinson Vol (%)": park_vol.round(2).values,
     })
-    summary["Name"]  = summary["Ticker"].map(ETF_NAMES)
+    summary["Name"]  = summary["Ticker"].map(etf_names)
     summary["As of"] = as_of
 
-    # Add Cap and Style
-    cap_map   = {STYLE_BOX[(c, s)]: c for c in CAPS for s in STYLES}
-    style_map = {STYLE_BOX[(c, s)]: s for c in CAPS for s in STYLES}
+    cap_map   = {style_box[(c, s)]: c for c in CAPS for s in STYLES}
+    style_map = {style_box[(c, s)]: s for c in CAPS for s in STYLES}
     summary["Cap"]   = summary["Ticker"].map(cap_map)
     summary["Style"] = summary["Ticker"].map(style_map)
 
-    # Daily cumulative return series
-    series = ((period_raw[TICKERS] - base[TICKERS]) / base[TICKERS] * 100).round(4)
-    series = series.rename(columns=ETF_NAMES)
+    series = ((period_raw[tickers] - base[tickers]) / base[tickers] * 100).round(4)
+    series = series.rename(columns=etf_names)
     series.index = series.index.date
 
     return summary, series
@@ -99,7 +128,7 @@ def fetch_data(start_date: date, end_date: date):
 
 # ── Style Box HTML ────────────────────────────────────────────────────────────
 
-def render_style_box_html(summary_df, period_label):
+def render_style_box_html(summary_df, period_label, style_box, etf_names):
     ret_map = summary_df.set_index("Ticker")["Return (%)"].to_dict()
     cur_map = summary_df.set_index("Ticker")["Current"].to_dict()
 
@@ -118,18 +147,18 @@ def render_style_box_html(summary_df, period_label):
         )
         cells = ""
         for style in STYLES:
-            ticker = STYLE_BOX[(cap, style)]
-            ret    = ret_map.get(ticker, 0)
-            cur    = cur_map.get(ticker, 0)
-            color  = "#1a9850" if ret >= 0 else "#d73027"
+            ticker   = style_box[(cap, style)]
+            ret      = ret_map.get(ticker, 0)
+            cur      = cur_map.get(ticker, 0)
+            color    = "#1a9850" if ret >= 0 else "#d73027"
             is_blend = style == "Blend"
-            bg = "rgba(107,114,128,0.10)" if is_blend else "rgba(255,255,255,0.02)"
-            border = "2px solid rgba(107,114,128,0.4)" if is_blend else "1px solid rgba(128,128,128,0.15)"
+            bg       = "rgba(107,114,128,0.10)" if is_blend else "rgba(255,255,255,0.02)"
+            border   = "2px solid rgba(107,114,128,0.4)" if is_blend else "1px solid rgba(128,128,128,0.15)"
             cells += (
                 f'<td style="padding:16px 22px;text-align:center;border:{border};'
                 f'background:{bg};min-width:150px;vertical-align:middle">'
                 f'<div style="font-family:monospace;font-size:16px;font-weight:bold;color:#ccc">{ticker}</div>'
-                f'<div style="font-size:11px;color:#888;margin:3px 0 8px 0">{ETF_NAMES.get(ticker, "")}</div>'
+                f'<div style="font-size:11px;color:#888;margin:3px 0 8px 0">{etf_names.get(ticker, "")}</div>'
                 f'<div style="font-size:26px;font-weight:bold;color:{color}">{ret:+.2f}%</div>'
                 f'<div style="font-size:11px;color:#aaa;margin-top:4px">${cur:.2f}</div>'
                 f'</td>'
@@ -243,6 +272,9 @@ def on_date():
     st.session_state.sb_preset = "Custom"
 
 with st.sidebar:
+    st.header("Fund Family")
+    family = st.radio("", list(FUND_FAMILIES.keys()), horizontal=True, key="sb_family", label_visibility="collapsed")
+
     st.header("Date Range")
     start_date = st.date_input("Start Date", max_value=today, key="sb_start_date", on_change=on_date)
     end_date   = st.date_input("End Date", value=today, min_value=start_date, key="sb_end_date", on_change=on_date)
@@ -250,23 +282,29 @@ with st.sidebar:
     if st.button("Refresh Data", type="primary"):
         st.cache_data.clear()
 
+# ── Resolve active fund family config ─────────────────────────────────────────
+
+style_box = FUND_FAMILIES[family]["style_box"]
+etf_names = FUND_FAMILIES[family]["etf_names"]
+tickers   = [style_box[(c, s)] for c in CAPS for s in STYLES]
+
 preset_label = st.session_state.get("sb_preset", "Period")
 period_label = f"{start_date.strftime('%m-%d-%Y')} --> {end_date.strftime('%m-%d-%Y')}"
 
 st.title("Equity Style Box Dashboard")
 st.caption(
-    f"Vanguard ETF 9-box grid — Value / Blend / Growth × Large / Mid / Small Cap · "
+    f"**{family}** ETF 9-box grid — Value / Blend / Growth × Large / Mid / Small Cap · "
     f"Period: **{period_label}**"
 )
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 try:
-    summary, series = fetch_data(start_date, end_date)
+    summary, series = fetch_data(start_date, end_date, tuple(tickers), family)
 
     # ── Style Box ─────────────────────────────────────────────────────────────
     st.subheader("Style Box")
-    st.markdown(render_style_box_html(summary, period_label), unsafe_allow_html=True)
+    st.markdown(render_style_box_html(summary, period_label, style_box, etf_names), unsafe_allow_html=True)
 
     # ── Summary metrics: by Cap and by Style ──────────────────────────────────
     st.subheader("Average Returns by Segment")
@@ -303,9 +341,9 @@ try:
     tab_bar, tab_line = st.tabs(["Bar Chart", "Line Chart"])
 
     with tab_bar:
-        color_by = st.radio("Color by", ["Style", "Cap"], horizontal=True, key="sb_bar_color")
+        color_by  = st.radio("Color by", ["Style", "Cap"], horizontal=True, key="sb_bar_color")
         color_map = STYLE_COLORS if color_by == "Style" else CAP_COLORS
-        bar_df = summary.sort_values("Return (%)", ascending=False)
+        bar_df    = summary.sort_values("Return (%)", ascending=False)
 
         fig_bar = px.bar(
             bar_df, x="Ticker", y="Return (%)",
@@ -359,8 +397,8 @@ try:
     # ── Factor Analysis ───────────────────────────────────────────────────────
     st.subheader("Factor Analysis")
 
-    # Build ticker-indexed series for spread calculations
-    t_series = series.rename(columns={v: k for k, v in ETF_NAMES.items()})
+    # Rename series columns from ETF names back to tickers for spread math
+    t_series = series.rename(columns={v: k for k, v in etf_names.items()})
 
     tab_vg, tab_sz, tab_rot = st.tabs(["Value vs Growth", "Size Premium", "Factor Rotation"])
 
@@ -369,7 +407,7 @@ try:
         smooth_vg = st.slider("Smoothing (days)", 1, 20, 1, key="sb_vg_smooth")
 
         vg_data = {
-            f"{cap}: Value − Growth": t_series[STYLE_BOX[(cap, "Value")]] - t_series[STYLE_BOX[(cap, "Growth")]]
+            f"{cap}: Value − Growth": t_series[style_box[(cap, "Value")]] - t_series[style_box[(cap, "Growth")]]
             for cap in CAPS
         }
         vg_df = pd.DataFrame(vg_data)
@@ -398,7 +436,7 @@ try:
         smooth_sz = st.slider("Smoothing (days)", 1, 20, 1, key="sb_sz_smooth")
 
         sz_data = {
-            f"{style}: Small − Large": t_series[STYLE_BOX[("Small", style)]] - t_series[STYLE_BOX[("Large", style)]]
+            f"{style}: Small − Large": t_series[style_box[("Small", style)]] - t_series[style_box[("Large", style)]]
             for style in STYLES
         }
         sz_df = pd.DataFrame(sz_data)
@@ -429,16 +467,15 @@ try:
         )
 
         avg_vg = pd.DataFrame({
-            cap: t_series[STYLE_BOX[(cap, "Value")]] - t_series[STYLE_BOX[(cap, "Growth")]]
+            cap: t_series[style_box[(cap, "Value")]] - t_series[style_box[(cap, "Growth")]]
             for cap in CAPS
         }).mean(axis=1)
 
         avg_sz = pd.DataFrame({
-            sty: t_series[STYLE_BOX[("Small", sty)]] - t_series[STYLE_BOX[("Large", sty)]]
+            sty: t_series[style_box[("Small", sty)]] - t_series[style_box[("Large", sty)]]
             for sty in STYLES
         }).mean(axis=1)
 
-        # Current signal metrics
         sig_col1, sig_col2 = st.columns(2)
         vg_now = avg_vg.iloc[-1]
         sz_now = avg_sz.iloc[-1]
@@ -460,7 +497,7 @@ try:
         )
         for row, (s_data, line_color) in enumerate([(avg_vg, "#3b82f6"), (avg_sz, "#f59e0b")], start=1):
             dates = pd.to_datetime(s_data.index)
-            y = s_data.values
+            y     = s_data.values
             fig_rot.add_trace(go.Scatter(x=dates, y=np.where(y > 0, y, 0),
                                          fill="tozeroy", fillcolor="rgba(34,197,94,0.15)",
                                          line=dict(width=0), showlegend=False, hoverinfo="skip"),
