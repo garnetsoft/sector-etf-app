@@ -3,8 +3,9 @@ import os
 import anthropic
 import streamlit as st
 from dotenv import load_dotenv
+from openai import OpenAI
 
-from utils import MODELS, estimate_cost
+from utils import LOCAL_BASE_URL, MODELS, estimate_cost, get_local_models
 
 load_dotenv()
 
@@ -23,19 +24,26 @@ SYSTEM_PRESETS = {
 with st.sidebar:
     st.header("Settings")
 
-    # Silent API key: show input only if not in env
-    _env_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if _env_key:
-        api_key = _env_key
-    else:
-        api_key = st.text_input(
-            "Anthropic API Key",
-            type="password",
-            help="Set ANTHROPIC_API_KEY in .env or enter here",
-        )
+    local_models   = get_local_models()
+    local_model_ids = set(local_models.values())
+    all_models     = {**MODELS, **local_models}
 
-    model_label = st.selectbox("Model", list(MODELS.keys()))
-    model       = MODELS[model_label]
+    model_label = st.selectbox("Model", list(all_models.keys()))
+    model       = all_models[model_label]
+
+    # API key only needed for Claude models
+    if model not in local_model_ids:
+        _env_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if _env_key:
+            api_key = _env_key
+        else:
+            api_key = st.text_input(
+                "Anthropic API Key",
+                type="password",
+                help="Set ANTHROPIC_API_KEY in .env or enter here",
+            )
+    else:
+        api_key = None
 
     st.divider()
     preset_label  = st.selectbox("System Prompt Preset", list(SYSTEM_PRESETS.keys()))
@@ -49,7 +57,7 @@ with st.sidebar:
     temperature = st.slider("Temperature", min_value=0.0, max_value=1.0,  value=1.0,  step=0.1)
 
     st.divider()
-    if st.button("Clear Conversation", use_container_width=True):
+    if st.button("Clear Conversation", width='stretch'):
         st.session_state.messages = []
         st.session_state.pop("usage", None)
         st.rerun()
@@ -66,7 +74,7 @@ with st.sidebar:
 # ── Main ──────────────────────────────────────────────────────────────────────
 st.title("Claude Chat")
 
-if not api_key:
+if model not in local_model_ids and not api_key:
     st.warning("Enter your Anthropic API key in the sidebar to get started.")
     st.stop()
 
@@ -87,21 +95,40 @@ if prompt := st.chat_input("Message Claude..."):
         full_response = ""
 
         try:
-            client = anthropic.Anthropic(api_key=api_key)
-
-            with client.messages.stream(
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system_prompt,
-                messages=st.session_state.messages,
-            ) as stream:
-                for text in stream.text_stream:
-                    full_response += text
-                    placeholder.markdown(full_response + "▌")
-
-            placeholder.markdown(full_response)
-            st.session_state.usage = stream.get_final_message().usage
+            if model in local_model_ids:
+                client = OpenAI(base_url=LOCAL_BASE_URL, api_key="no-key")
+                stream = client.chat.completions.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    messages=[{"role": "system", "content": system_prompt}] + st.session_state.messages,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
+                input_tokens = output_tokens = 0
+                for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        full_response += chunk.choices[0].delta.content
+                        placeholder.markdown(full_response + "▌")
+                    if chunk.usage:
+                        input_tokens  = chunk.usage.prompt_tokens
+                        output_tokens = chunk.usage.completion_tokens
+                placeholder.markdown(full_response)
+                st.session_state.usage = type("Usage", (), {"input_tokens": input_tokens, "output_tokens": output_tokens})()
+            else:
+                client = anthropic.Anthropic(api_key=api_key)
+                with client.messages.stream(
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    system=system_prompt,
+                    messages=st.session_state.messages,
+                ) as stream:
+                    for text in stream.text_stream:
+                        full_response += text
+                        placeholder.markdown(full_response + "▌")
+                placeholder.markdown(full_response)
+                st.session_state.usage = stream.get_final_message().usage
 
         except anthropic.AuthenticationError:
             st.error("Invalid API key. Please check your key in the sidebar.")

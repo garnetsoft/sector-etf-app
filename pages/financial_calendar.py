@@ -260,7 +260,7 @@ if view_mode == "Table":
         .style.applymap(color_event, subset=["Event"])
         .format({"Days Away": lambda x: f"+{x}d"})
     )
-    st.dataframe(styled, use_container_width=True, height=600)
+    st.dataframe(styled, width='stretch', height=600)
 
 else:  # Calendar view
     months_in_range = sorted(

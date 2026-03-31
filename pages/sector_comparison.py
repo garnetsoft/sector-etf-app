@@ -10,9 +10,10 @@ import plotly.express as px
 import streamlit as st
 import yfinance as yf
 from dotenv import load_dotenv
+from openai import OpenAI
 from xhtml2pdf import pisa
 
-from utils import ETF_TO_GICS, MODELS, estimate_cost
+from utils import ETF_TO_GICS, LOCAL_BASE_URL, MODELS, estimate_cost, get_local_models
 
 load_dotenv()
 
@@ -228,14 +229,21 @@ def generate_pdf(df, start_date, end_date, preset, model_id, analysis_text):
 with st.sidebar:
     st.header("Settings")
 
-    _env_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if _env_key:
-        api_key = _env_key
-    else:
-        api_key = st.text_input("Anthropic API Key", type="password")
+    local_models    = get_local_models()
+    local_model_ids = set(local_models.values())
+    all_models      = {**MODELS, **local_models}
 
-    model_label = st.selectbox("Model", list(MODELS.keys()))
-    model       = MODELS[model_label]
+    model_label = st.selectbox("Model", list(all_models.keys()))
+    model       = all_models[model_label]
+
+    if model not in local_model_ids:
+        _env_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if _env_key:
+            api_key = _env_key
+        else:
+            api_key = st.text_input("Anthropic API Key", type="password")
+    else:
+        api_key = None
 
     st.divider()
     st.header("Period")
@@ -252,14 +260,14 @@ with st.sidebar:
     end_date   = st.date_input("End Date",   value=today, min_value=start_date)
 
     st.divider()
-    run = st.button("Run Comparison", type="primary", use_container_width=True)
+    run = st.button("Run Comparison", type="primary", width='stretch')
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 st.title("Sector Comparison")
 st.caption("Cross-sector performance, rotation signals, and AI-powered ranking across all 11 S&P 500 sectors.")
 
-if not api_key:
+if model not in local_model_ids and not api_key:
     st.warning("Enter your Anthropic API key in the sidebar.")
 
 period_label = f"{start_date.strftime('%m-%d-%Y')} → {end_date.strftime('%m-%d-%Y')}"
@@ -305,7 +313,7 @@ try:
 
     styled = (
         df.style
-        .applymap(color_ret, subset=["Return (%)", "% from High", "% from Low"])
+        .map(color_ret, subset=["Return (%)", "% from High", "% from Low"])
         .format({
             "Return (%)":    "{:+.2f}%",
             "% from High":   "{:+.2f}%",
@@ -317,7 +325,7 @@ try:
             "Parkinson Vol": "{:.2f}%",
         }, na_rep="—")
     )
-    st.dataframe(styled, use_container_width=True, height=450)
+    st.dataframe(styled, width='stretch', height=450)
 
     # ── Line chart ────────────────────────────────────────────────────────────
     st.subheader("Performance Over Time")
@@ -335,7 +343,7 @@ try:
 
     # ── AI Analysis ───────────────────────────────────────────────────────────
     if run:
-        if not api_key:
+        if model not in local_model_ids and not api_key:
             st.error("API key required to run analysis.")
             st.stop()
 
@@ -345,22 +353,42 @@ try:
         st.caption(f"Powered by {model_name}")
 
         prompt    = build_comparison_prompt(df, start_date, end_date, preset)
-        client    = anthropic.Anthropic(api_key=api_key)
         full_text = ""
 
         try:
             output = st.empty()
-            with client.messages.stream(
-                model=model,
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}],
-            ) as stream:
-                for text in stream.text_stream:
-                    full_text += text
-                    output.markdown(full_text + "▌")
-            output.markdown(full_text)
+            if model in local_model_ids:
+                client = OpenAI(base_url=LOCAL_BASE_URL, api_key="no-key")
+                input_tokens = output_tokens = 0
+                stream = client.chat.completions.create(
+                    model=model,
+                    max_tokens=4096,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
+                for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        full_text += chunk.choices[0].delta.content
+                        output.markdown(full_text + "▌")
+                    if chunk.usage:
+                        input_tokens  = chunk.usage.prompt_tokens
+                        output_tokens = chunk.usage.completion_tokens
+                output.markdown(full_text)
+                usage = type("Usage", (), {"input_tokens": input_tokens, "output_tokens": output_tokens})()
+            else:
+                client = anthropic.Anthropic(api_key=api_key)
+                with client.messages.stream(
+                    model=model,
+                    max_tokens=4096,
+                    messages=[{"role": "user", "content": prompt}],
+                ) as stream:
+                    for text in stream.text_stream:
+                        full_text += text
+                        output.markdown(full_text + "▌")
+                output.markdown(full_text)
+                usage = stream.get_final_message().usage
 
-            usage    = stream.get_final_message().usage
             cost_str = estimate_cost(model, usage.input_tokens, usage.output_tokens)
             st.caption(
                 f"Tokens — input: {usage.input_tokens:,} · output: {usage.output_tokens:,} · "

@@ -31,12 +31,30 @@ MODELS = {
     "Claude Haiku 4.5 (Fastest)":      "claude-haiku-4-5-20251001",
 }
 
+LOCAL_BASE_URL = "http://localhost:8080/v1"
+
 # USD per 1M tokens: (input_price, output_price)
 MODEL_PRICING = {
     "claude-sonnet-4-6":         (3.00, 15.00),
     "claude-opus-4-6":           (15.00, 75.00),
     "claude-haiku-4-5-20251001": (0.80, 4.00),
 }
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_local_models() -> dict:
+    """Query local llama-server for available models. Returns {display_name: model_id}."""
+    try:
+        resp = requests.get(f"{LOCAL_BASE_URL}/models", timeout=2)
+        resp.raise_for_status()
+        result = {}
+        for m in resp.json().get("data", []):
+            model_id = m["id"]
+            display  = model_id.removesuffix(".gguf") + " (Local, Free)"
+            result[display] = model_id
+        return result
+    except Exception:
+        return {}
 
 
 # ── Cost helper ────────────────────────────────────────────────────────────────

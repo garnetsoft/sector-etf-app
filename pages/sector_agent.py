@@ -11,10 +11,11 @@ import requests
 import streamlit as st
 import yfinance as yf
 from dotenv import load_dotenv
+from openai import OpenAI
 import markdown as md
 from xhtml2pdf import pisa
 
-from utils import ETF_TO_GICS, MODELS, estimate_cost, get_sp500_constituents
+from utils import ETF_TO_GICS, LOCAL_BASE_URL, MODELS, estimate_cost, get_local_models, get_sp500_constituents
 
 load_dotenv()
 
@@ -273,15 +274,22 @@ def generate_pdf(sector_name, etf, start_date, end_date, analysis_text, num_stoc
 with st.sidebar:
     st.header("Agent Settings")
 
-    # Silent API key: show input only if not in env
-    _env_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if _env_key:
-        api_key = _env_key
-    else:
-        api_key = st.text_input("Anthropic API Key", type="password")
+    local_models    = get_local_models()
+    local_model_ids = set(local_models.values())
+    all_models      = {**MODELS, **local_models}
 
-    model_label = st.selectbox("Model", list(MODELS.keys()))
-    model       = MODELS[model_label]
+    model_label = st.selectbox("Model", list(all_models.keys()))
+    model       = all_models[model_label]
+
+    # API key only needed for Claude models
+    if model not in local_model_ids:
+        _env_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if _env_key:
+            api_key = _env_key
+        else:
+            api_key = st.text_input("Anthropic API Key", type="password")
+    else:
+        api_key = None
 
     st.divider()
     st.header("Period")
@@ -298,16 +306,18 @@ with st.sidebar:
     end_date   = st.date_input("End Date",   value=today, min_value=start_date)
 
     st.divider()
-    extended_thinking = st.toggle(
-        "Extended Thinking",
-        value=False,
-        help="Claude reasons step-by-step before answering. Slower but deeper analysis. Requires Sonnet or Opus.",
-    )
+    extended_thinking = False
+    if model not in local_model_ids:
+        extended_thinking = st.toggle(
+            "Extended Thinking",
+            value=False,
+            help="Claude reasons step-by-step before answering. Slower but deeper analysis. Requires Sonnet or Opus.",
+        )
     if extended_thinking:
         thinking_budget = st.slider("Thinking budget (tokens)", 2000, 10000, 5000, 1000)
 
     st.divider()
-    run = st.button("Run Analysis", type="primary", use_container_width=True)
+    run = st.button("Run Analysis", type="primary", width='stretch')
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -318,7 +328,7 @@ sector_options = list(ETF_TO_GICS.values())
 sector_name    = st.radio("Select Sector", sector_options, horizontal=True, index=0)
 etf            = {v: k for k, v in ETF_TO_GICS.items()}[sector_name]
 
-if not api_key:
+if model not in local_model_ids and not api_key:
     st.warning("Enter your Anthropic API key in the sidebar.")
     st.stop()
 
@@ -352,12 +362,33 @@ if run:
     st.divider()
 
     prompt = build_prompt(sector_name, etf, start_date, end_date, data, sp500)
-    client = anthropic.Anthropic(api_key=api_key)
     full_text = ""
     usage = None
 
     try:
-        if extended_thinking:
+        if model in local_model_ids:
+            client = OpenAI(base_url=LOCAL_BASE_URL, api_key="no-key")
+            output = st.empty()
+            input_tokens = output_tokens = 0
+            stream = client.chat.completions.create(
+                model=model,
+                max_tokens=8192,
+                messages=[{"role": "user", "content": prompt}],
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    full_text += chunk.choices[0].delta.content
+                    output.markdown(full_text + "▌")
+                if chunk.usage:
+                    input_tokens  = chunk.usage.prompt_tokens
+                    output_tokens = chunk.usage.completion_tokens
+            output.markdown(full_text)
+            usage = type("Usage", (), {"input_tokens": input_tokens, "output_tokens": output_tokens})()
+
+        elif extended_thinking:
+            client = anthropic.Anthropic(api_key=api_key)
             with st.spinner("Thinking deeply... this may take a minute."):
                 response = client.messages.create(
                     model=model,
@@ -381,6 +412,7 @@ if run:
             usage = response.usage
 
         else:
+            client = anthropic.Anthropic(api_key=api_key)
             output = st.empty()
             with client.messages.stream(
                 model=model,

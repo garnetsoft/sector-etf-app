@@ -97,6 +97,24 @@ FUND_FAMILIES = {
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
 
+FAMILIES = ["Vanguard", "SPDR", "BlackRock"]
+
+@st.cache_data(ttl=3600, show_spinner="Downloading master comparison data...")
+def fetch_master_returns(start_date: date, end_date: date) -> dict:
+    all_tickers = [
+        FUND_FAMILIES[f]["style_box"][(c, s)]
+        for f in FAMILIES for c in CAPS for s in STYLES
+    ]
+    fetch_start = (start_date - timedelta(days=10)).isoformat()
+    fetch_end   = (end_date   + timedelta(days=1)).isoformat()
+    ohlcv  = yf.download(all_tickers, start=fetch_start, end=fetch_end, auto_adjust=True, progress=False)
+    raw    = ohlcv["Close"]
+    base   = raw[raw.index.date <= start_date].iloc[-1]
+    latest = raw[(raw.index.date >= start_date) & (raw.index.date <= end_date)].iloc[-1]
+    ret    = ((latest - base) / base * 100).round(2)
+    return ret.to_dict()
+
+
 @st.cache_data(ttl=3600, show_spinner="Downloading price data...")
 def fetch_data(start_date: date, end_date: date, tickers_tuple: tuple, family: str):
     tickers   = list(tickers_tuple)
@@ -148,6 +166,67 @@ def fetch_data(start_date: date, end_date: date, tickers_tuple: tuple, family: s
     series.index = series.index.date
 
     return summary, series
+
+
+# ── Master cross-family table HTML ───────────────────────────────────────────
+
+def render_master_table_html(returns: dict, period_label: str) -> str:
+    FAMILY_LABELS = {"Vanguard": "Vanguard", "SPDR": "SPDR", "BlackRock": "iShares"}
+
+    # Top header: style groups spanning 3 family columns each
+    style_headers = "".join(
+        f'<th colspan="3" style="padding:8px 12px;text-align:center;font-size:13px;'
+        f'font-weight:bold;color:{STYLE_COLORS[s]};border-bottom:2px solid {STYLE_COLORS[s]};">'
+        f'{s.upper()}</th>'
+        for s in STYLES
+    )
+
+    # Sub-header: family labels
+    family_headers = "".join(
+        f'<th style="padding:6px 10px;text-align:center;font-size:11px;color:#aaa;'
+        f'white-space:nowrap;border-right:1px solid rgba(128,128,128,0.15)">'
+        f'{FAMILY_LABELS[f]}</th>'
+        for s in STYLES for f in FAMILIES
+    )
+
+    rows_html = ""
+    for cap in CAPS:
+        cap_color = CAP_COLORS[cap]
+        cells = ""
+        for style in STYLES:
+            for i, fam in enumerate(FAMILIES):
+                ticker = FUND_FAMILIES[fam]["style_box"][(cap, style)]
+                ret    = returns.get(ticker, float("nan"))
+                if ret == ret:  # not NaN
+                    color  = "#1a9850" if ret >= 0 else "#d73027"
+                    ret_str = f'<span style="color:{color};font-weight:bold">{ret:+.2f}%</span>'
+                else:
+                    ret_str = '<span style="color:#666">—</span>'
+                border_right = "1px solid rgba(128,128,128,0.15)" if i < 2 else "2px solid rgba(128,128,128,0.25)"
+                cells += (
+                    f'<td style="padding:10px 14px;text-align:center;border-right:{border_right}">'
+                    f'<div style="font-family:monospace;font-size:14px;font-weight:bold;color:#ccc">{ticker}</div>'
+                    f'<div style="font-size:13px;margin-top:3px">{ret_str}</div>'
+                    f'</td>'
+                )
+        rows_html += (
+            f'<tr style="border-bottom:1px solid rgba(128,128,128,0.2)">'
+            f'<td style="padding:10px 14px;font-weight:bold;font-size:13px;color:{cap_color};'
+            f'white-space:nowrap;border-right:2px solid rgba(128,128,128,0.3)">{cap.upper()}</td>'
+            f'{cells}</tr>'
+        )
+
+    return (
+        f'<div style="overflow-x:auto">'
+        f'<table style="border-collapse:collapse;font-family:sans-serif">'
+        f'<thead>'
+        f'<tr><th style="padding:8px 14px;font-size:11px;color:#666">Period: {period_label}</th>'
+        f'{style_headers}</tr>'
+        f'<tr><th></th>{family_headers}</tr>'
+        f'</thead>'
+        f'<tbody>{rows_html}</tbody>'
+        f'</table></div>'
+    )
 
 
 # ── Style Box HTML ────────────────────────────────────────────────────────────
@@ -307,6 +386,15 @@ preset_label = st.session_state.get("sb_preset", "Period")
 period_label = f"{start_date.strftime('%m-%d-%Y')} --> {end_date.strftime('%m-%d-%Y')}"
 
 st.title("Equity Style Box Dashboard")
+
+try:
+    master_returns = fetch_master_returns(start_date, end_date)
+    st.subheader("Cross-Family Comparison")
+    st.markdown(render_master_table_html(master_returns, period_label), unsafe_allow_html=True)
+except Exception as e:
+    st.error(f"Could not load cross-family data: {e}")
+
+st.divider()
 family = st.radio("Fund Family", list(FUND_FAMILIES.keys()), horizontal=True, key="sb_family")
 
 # ── Resolve active fund family config ─────────────────────────────────────────
@@ -379,11 +467,11 @@ try:
         )
         fig_bar.update_traces(textposition="outside")
         fig_bar.update_layout(xaxis_title="", yaxis_ticksuffix="%", coloraxis_showscale=False)
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(fig_bar, width='stretch')
 
     with tab_line:
         all_names = list(series.columns)
-        if "sb_line_sel" not in st.session_state:
+        if "sb_line_sel" not in st.session_state or set(st.session_state.sb_line_sel.keys()) != set(all_names):
             st.session_state.sb_line_sel = {n: True for n in all_names}
 
         c1, c2, _ = st.columns([1, 1, 8])
@@ -413,7 +501,7 @@ try:
                                title=f"Cumulative Return (%) — {period_label}", height=500)
             fig_line.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
             fig_line.update_layout(xaxis_title="", yaxis_ticksuffix="%", legend_title="")
-            st.plotly_chart(fig_line, use_container_width=True)
+            st.plotly_chart(fig_line, width='stretch')
         else:
             st.info("Select at least one ETF to display the chart.")
 
@@ -452,7 +540,7 @@ try:
                          title=f"Value − Growth Spread — {period_label}")
         fig_vg.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
         fig_vg.update_layout(xaxis_title="", yaxis_ticksuffix="%", legend_title="")
-        st.plotly_chart(fig_vg, use_container_width=True)
+        st.plotly_chart(fig_vg, width='stretch')
 
     with tab_sz:
         st.caption("Small minus Large return spread by style. Positive = Small-cap outperforming.")
@@ -481,7 +569,7 @@ try:
                          title=f"Small − Large Spread — {period_label}")
         fig_sz.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
         fig_sz.update_layout(xaxis_title="", yaxis_ticksuffix="%", legend_title="")
-        st.plotly_chart(fig_sz, use_container_width=True)
+        st.plotly_chart(fig_sz, width='stretch')
 
     with tab_rot:
         st.caption(
@@ -536,7 +624,7 @@ try:
 
         fig_rot.update_yaxes(ticksuffix="%")
         fig_rot.update_layout(height=500, xaxis_title="")
-        st.plotly_chart(fig_rot, use_container_width=True)
+        st.plotly_chart(fig_rot, width='stretch')
 
     # ── Returns & Price Table ─────────────────────────────────────────────────
     st.subheader(f"Returns & Price — {period_label}")
